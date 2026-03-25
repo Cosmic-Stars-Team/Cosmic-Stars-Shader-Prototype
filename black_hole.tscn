@@ -1,0 +1,52 @@
+[gd_scene format=3 uid="uid://5ei7qpnejdmw"]
+
+[ext_resource type="Script" uid="uid://u8inby805ucp" path="res://camera_3d.gd" id="1_5vpqt"]
+[ext_resource type="Shader" uid="uid://gd3gu4hc0c3m" path="res://BlackHole.gdshader" id="1_sjfy6"]
+[ext_resource type="Texture2D" uid="uid://cdjuddtyvblls" path="res://starmap_2020_8k.exr" id="2_q56d7"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_q3cb1"]
+render_priority = 0
+shader = ExtResource("1_sjfy6")
+shader_parameter/Rs = 0.5
+shader_parameter/gravity_strength = 1.0
+shader_parameter/steps = 64
+shader_parameter/base_step = 0.05
+
+[sub_resource type="QuadMesh" id="QuadMesh_yefb3"]
+material = SubResource("ShaderMaterial_q3cb1")
+size = Vector2(2, 2)
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_5vpqt"]
+render_priority = 0
+shader = ExtResource("1_sjfy6")
+shader_parameter/Rs = 4.0
+shader_parameter/gravity_strength = 1.0
+shader_parameter/steps = 640
+shader_parameter/base_step = 0.05
+shader_parameter/sky_texture = ExtResource("2_q56d7")
+
+[sub_resource type="Environment" id="Environment_5vpqt"]
+tonemap_mode = 1
+glow_enabled = true
+glow_intensity = 0.81
+glow_bloom = 0.3
+glow_blend_mode = 0
+glow_hdr_threshold = 0.76
+adjustment_enabled = true
+adjustment_saturation = 1.3
+
+[node name="BlackHole" type="Node3D" unique_id=1213038861]
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1588363725]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 30)
+far = 40000.0
+script = ExtResource("1_5vpqt")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Camera3D" unique_id=1679452845]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 114.05853, 125.72394, -82.184296)
+extra_cull_margin = 16384.0
+mesh = SubResource("QuadMesh_yefb3")
+surface_material_override/0 = SubResource("ShaderMaterial_5vpqt")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1501309250]
+environment = SubResource("Environment_5vpqt")
