@@ -4,7 +4,7 @@ render_mode unshaded, cull_disabled, depth_test_disabled, depth_draw_never;
 
 uniform float Rs = 0.5;
 uniform float gravity_strength = 1.0;
-uniform int steps = 64;
+uniform int steps = 256;
 uniform float base_step = 0.05;
 uniform sampler2D sky_texture : filter_nearest;
 
@@ -28,17 +28,21 @@ uniform float disk_visual_time_scale = 0.02;
 uniform float disk_temperature_argument = 1e20;
 uniform float peak_temperature_pow4 = 5.665278e18;
 uniform float disk_temp_to_rgb_scale = 1.0;
+uniform float disk_temp_kelvin_min = 800.0;
+uniform float disk_temp_kelvin_max = 22000.0;
 uniform float disk_white_mix = 0.0;
 uniform float disk_brightness_floor = 0.002;
 uniform float disk_rgb_floor = 0.0;
 uniform float beaming_spectral_index = 0.0;
 uniform float beaming_strength = 1.0;
-uniform float beaming_clamp = 64.0;
+uniform float beaming_clamp = 12.0;
 
 // Output to Godot post chain
 uniform float output_exposure = 1.0;
 uniform float bloom_threshold = 1.0;
 uniform float bloom_emission = 2.5;
+uniform float use_reinhard_tonemap = 1.0;
+uniform float emission_soft_clip = 1.0;
 
 const int MAX_STEPS = 512;
 
@@ -356,6 +360,7 @@ vec4 calculate_disk_color(
 
             float thermal_kelvin = disk_temperature / exp((pos_r - inter_radius) / (0.6 * max(outer_radius - inter_radius, 1e-6)));
             thermal_kelvin *= disk_temp_to_rgb_scale;
+            thermal_kelvin = clamp(thermal_kelvin, disk_temp_kelvin_min, disk_temp_kelvin_max);
             vec3 thermal_rgb = KelvinToRgb(thermal_kelvin);
             thermal_rgb = mix(thermal_rgb, vec3(1.0, 0.97, 0.92), clamp(disk_white_mix, 0.0, 1.0));
 
@@ -371,7 +376,7 @@ vec4 calculate_disk_color(
             color.rgb = max(color.rgb, vec3(disk_rgb_floor) * color.a * thermal_rgb);
         }
     }
-
+	
     return base_color + color * (1.0 - base_color.a);
 }
 
@@ -461,9 +466,7 @@ void fragment() {
         step_length = dl;
     }
 
-    if (!hit_hole && dot(x, v) < 0.0) {
-        hit_hole = true;
-    }
+
 
     vec3 out_col = vec3(0.0);
     if (!hit_hole) {
@@ -473,11 +476,33 @@ void fragment() {
         vec2 uv = vec2(phi / (2.0 * PI) + 0.5, theta / PI);
         out_col = texture(sky_texture, uv).rgb;
     }
+	if (hit_hole) {
+        // 既然这根光线最终跌入了黑洞，那无论它在路上穿过了多亮的前景气体，
+        // 我们都强行剥夺它的亮度，或者对其进行极大的衰减。
+        // 乘以 0.0 代表完全抹除前景气体，黑球将呈现绝对的纯黑和完美边缘；
+        // 乘以 0.05 代表保留极微弱的前景气体质感。你可以自己权衡这个艺术值。
+        disk_col_accum.rgb *= 0.0; 
+        disk_col_accum.a *= 0.0; 
+    }
 
     float disk_a = clamp(disk_col_accum.a, 0.0, 1.0);
     vec3 composite = mix(out_col, disk_col_accum.rgb, disk_a) * output_exposure;
-    vec3 bloom_part = max((disk_col_accum.rgb * output_exposure) - vec3(bloom_threshold), vec3(0.0));
+	if (any(isnan(composite)) || any(isinf(composite))) {
+        composite = vec3(0.0); 
+    }
+	composite = clamp(composite, vec3(0.0), vec3(128.0));
+	
+    vec3 display_col = composite;
+    if (use_reinhard_tonemap > 0.5) {
+        display_col = composite / (vec3(1.0) + composite);
+    }
+	
+    ALBEDO = clamp(display_col, vec3(0.0), vec3(1.0));
 
-    ALBEDO = min(composite, vec3(1.0));
-    EMISSION = bloom_part * bloom_emission;
+    // Bloom source from display-space color to avoid HDR blow-up.
+    vec3 bloom_src = max(display_col - vec3(bloom_threshold), vec3(0.0));
+    if (emission_soft_clip > 0.0) {
+        bloom_src = bloom_src / (vec3(emission_soft_clip) + bloom_src);
+    }
+EMISSION = clamp(bloom_src * bloom_emission, vec3(0.0), vec3(128.0));
 }
