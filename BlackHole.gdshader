@@ -1,4 +1,3 @@
-
 shader_type spatial;
 
 render_mode unshaded, cull_disabled, depth_test_disabled, depth_draw_never;
@@ -19,7 +18,11 @@ uniform float thin_ratio = 0.5;
 uniform float noise_scale = 1.0;
 uniform float noise_contrast = 80.0;
 uniform float time_rate = 30.0;
+uniform float time_override = -1.0;
 uniform float shift_max = 1.25;
+uniform float disk_visual_rotate_speed = 0.18;
+uniform float disk_outer_spin_ratio = 0.55;
+uniform float disk_visual_time_scale = 0.02;
 
 // Temperature/brightness chain controls
 uniform float disk_temperature_argument = 1e20;
@@ -28,6 +31,9 @@ uniform float disk_temp_to_rgb_scale = 1.0;
 uniform float disk_white_mix = 0.0;
 uniform float disk_brightness_floor = 0.002;
 uniform float disk_rgb_floor = 0.0;
+uniform float beaming_spectral_index = 0.0;
+uniform float beaming_strength = 1.0;
+uniform float beaming_clamp = 64.0;
 
 // Output to Godot post chain
 uniform float output_exposure = 1.0;
@@ -194,7 +200,7 @@ vec3 ApplyBlackHoleRotation(vec3 direction, vec3 disk_normal, vec3 world_up) {
 
 vec4 calculate_disk_color(
     vec4 base_color,
-    float time_rate_local,
+    float animated_time,
     float step_length,
     vec3 camera_world_pos,
     vec3 ray_pos,
@@ -216,7 +222,6 @@ vec4 calculate_disk_color(
     vec3 pos_on_disk = WorldToBlackHoleSpace(ray_pos, black_hole_pos, disk_normal, world_up);
     vec3 last_pos_on_disk = WorldToBlackHoleSpace(last_ray_pos, black_hole_pos, disk_normal, world_up);
     vec3 dir_on_disk = ApplyBlackHoleRotation(ray_dir, disk_normal, world_up);
-
     float pos_r = length(pos_on_disk.zx);
     float pos_y = pos_on_disk.y;
     float last_pos_y = last_pos_on_disk.y;
@@ -226,7 +231,7 @@ vec4 calculate_disk_color(
         if (abs(denom) > 1e-6) {
             vec3 c_point = (-pos_on_disk * last_pos_y + last_pos_on_disk * pos_y) / denom;
             pos_on_disk = c_point + min(thin, length(c_point - last_pos_on_disk)) * dir_on_disk *
-                (-1.0 + 2.0 * RandomStep(10000000000.0 * pos_on_disk.zx, fract(TIME * 1.0 + 0.5)));
+                (-1.0 + 2.0 * RandomStep(10000000000.0 * pos_on_disk.zx, fract(animated_time + 0.5)));
 
             step_length = length(pos_on_disk - last_pos_on_disk);
             pos_r = length(pos_on_disk.zx);
@@ -262,7 +267,7 @@ vec4 calculate_disk_color(
             float half_pi_time_inside = kPi / max(GetKeplerianAngularVelocity(3.0 * rs, rs), 1e-6);
 
             float spiral_theta = 12.0 * 2.0 / sqrt(3.0) * atan(sqrt(max(0.6666666 * (pos_r / max(rs, 1e-6)) - 1.0, 0.0)));
-            float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * TIME * time_rate_local;
+            float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * animated_time;
             float pos_theta_for_inner_cloud = Vec2ToTheta(pos_on_disk.zx, vec2(cos(0.666666 * inner_theta), sin(0.666666 * inner_theta)));
             float pos_theta = Vec2ToTheta(pos_on_disk.zx, vec2(cos(-spiral_theta), sin(-spiral_theta)));
 
@@ -272,38 +277,49 @@ vec4 calculate_disk_color(
             );
 
             vec3 cloud_velocity = kLightYear / kSpeedOfLight * angular_velocity * cross(vec3(0.0, 1.0, 0.0), pos_on_disk);
-            float relative_velocity = dot(-dir_on_disk, cloud_velocity);
-            float dopler = sqrt(max((1.0 + relative_velocity) / max(1.0 - relative_velocity, 1e-6), 0.0));
-            float red_shift = dopler * sqrt(max(1.0 - rs / max(pos_r, 1e-6), 0.000001)) /
-                              sqrt(max(1.0 - rs / max(length(camera_pos), 1e-6), 0.000001));
+            vec3 n_to_observer = normalize(-dir_on_disk);
+            float beta2 = clamp(dot(cloud_velocity, cloud_velocity), 0.0, 0.9999);
+            float gamma = 1.0 / sqrt(max(1.0 - beta2, 1e-6));
+            float beta_los = clamp(dot(cloud_velocity, n_to_observer), -0.9999, 0.9999);
+            float dopler = 1.0 / max(gamma * (1.0 - beta_los), 1e-6); // delta
+            float grav_shift = sqrt(max(1.0 - rs / max(pos_r, 1e-6), 0.000001)) /
+                               sqrt(max(1.0 - rs / max(length(camera_pos), 1e-6), 0.000001));
+            float red_shift = dopler * grav_shift;
+            float beaming = pow(max(dopler, 1e-4), 3.0 + beaming_spectral_index);
+            beaming = mix(1.0, min(beaming, beaming_clamp), clamp(beaming_strength, 0.0, 1.0));
 
             float density = Shape(effective_radius, 4.0, 0.9);
             float thick = 0.0;
             float vertical_mix_factor = 0.0;
             float dust_color = 0.0;
 
+            // Make outer disk visibly rotate as well; keep inner ring faster.
+            float radius_ratio = clamp(inter_radius / max(pos_r, 1e-6), 0.0, 1.0);
+            float radius_spin_mix = mix(disk_outer_spin_ratio, 1.0, radius_ratio);
+            float visual_phase = animated_time * disk_visual_rotate_speed * disk_visual_time_scale * radius_spin_mix;
+
             float rot_pos_r = pos_r / max(rs, 1e-6) +
-                0.3 * sqrt(3.0) * kSpeedOfLight / kLightYear / 3.0 / sqrt(3.0) / max(rs, 1e-6) * time_rate_local * TIME;
+                0.3 * sqrt(3.0) * kSpeedOfLight / kLightYear / 3.0 / sqrt(3.0) / max(rs, 1e-6) * animated_time;
 
             vec4 color0 = vec4(0.0);
 
             if (abs(pos_y) < thin * density) {
-                thick = thin * density * (0.4 + 0.6 * SoftSaturate(GenerateAccretionDiskNoise(noise_scale * vec3(1.5 * pos_theta, rot_pos_r, 1.0), 1, 3, noise_contrast)));
+                thick = thin * density * (0.4 + 0.6 * SoftSaturate(GenerateAccretionDiskNoise(noise_scale * vec3(1.5 * (pos_theta + visual_phase), rot_pos_r + 0.18 * visual_phase, 1.0), 1, 3, noise_contrast)));
                 vertical_mix_factor = max(0.0, 1.0 - abs(pos_y) / max(thick, 1e-6));
                 density *= 0.7 * vertical_mix_factor * density;
 
-                color0 = vec4(GenerateAccretionDiskNoise(noise_scale * vec3(1.0 * rot_pos_r, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * pos_theta), 3, 6, noise_contrast));
+                color0 = vec4(GenerateAccretionDiskNoise(noise_scale * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
 
                 if (pos_theta + kPi < 0.1 * kPi) {
                     float blend = (pos_theta + kPi) / (0.1 * kPi);
                     color0 *= blend;
-                    color0 += (1.0 - blend) * vec4(GenerateAccretionDiskNoise(noise_scale * vec3(1.0 * rot_pos_r, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (2.0 * kPi + pos_theta)), 3, 6, noise_contrast));
+                    color0 += (1.0 - blend) * vec4(GenerateAccretionDiskNoise(noise_scale * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (2.0 * kPi + pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
                 }
 
                 color0.xyz *= density * 1.4 * (
                     0.2 + 0.8 * vertical_mix_factor +
                     (0.8 - 0.8 * vertical_mix_factor) *
-                    GenerateAccretionDiskNoise(noise_scale * vec3(rot_pos_r, 1.5 * pos_theta, pos_y / max(min(rs, thin / 0.1), 1e-6)), 1, 3, noise_contrast)
+                    GenerateAccretionDiskNoise(noise_scale * vec3(rot_pos_r + 0.12 * visual_phase, 1.5 * (pos_theta + visual_phase), pos_y / max(min(rs, thin / 0.1), 1e-6)), 1, 3, noise_contrast)
                 );
                 color0.a *= density;
             }
@@ -313,7 +329,7 @@ vec4 calculate_disk_color(
                 dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) *
                     GenerateAccretionDiskNoise(
                         noise_scale * vec3(
-                            1.5 * fract((1.5 * pos_theta_for_inner_cloud + kPi / max(half_pi_time_inside, 1e-6) * TIME * time_rate_local) / (2.0 * kPi)) * 2.0 * kPi,
+                            1.5 * fract((1.5 * pos_theta_for_inner_cloud + kPi / max(half_pi_time_inside, 1e-6) * animated_time + visual_phase) / (2.0 * kPi)) * 2.0 * kPi,
                             pos_r / max(rs, 1e-6),
                             pos_y / max(min(rs, thin / 0.1), 1e-6)
                         ),
@@ -331,7 +347,8 @@ vec4 calculate_disk_color(
 
             float bright_without_redshift = 4.5 * disk_temperature * disk_temperature * disk_temperature * disk_temperature / max(peak_temp_pow4_local, 1e-6);
             if (disk_temperature > 1000.0) {
-                disk_temperature = max(1000.0, disk_temperature * red_shift * dopler * dopler);
+                // Standard shift for blackbody temperature uses frequency shift once.
+                disk_temperature = max(1000.0, disk_temperature * red_shift);
             }
 
             disk_temperature = min(100000.0, disk_temperature);
@@ -343,7 +360,8 @@ vec4 calculate_disk_color(
             thermal_rgb = mix(thermal_rgb, vec3(1.0, 0.97, 0.92), clamp(disk_white_mix, 0.0, 1.0));
 
             color.xyz *= bright_without_redshift * min(1.0, 1.8 * (outer_radius - pos_r) / max(outer_radius - inter_radius, 1e-6)) * thermal_rgb;
-            color.xyz *= min(shift_max_local, red_shift) * min(shift_max_local, dopler);
+            color.xyz *= min(shift_max_local, red_shift);
+            color.xyz *= beaming;
 
             red_shift = min(red_shift, shift_max_local);
             color.xyz *= pow(abs(1.0 - (1.0 - min(1.0, red_shift)) * (pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6)), 9.0);
@@ -377,8 +395,9 @@ void fragment() {
     bool hit_hole = false;
     float real_escape_radius = 500.0;
 
+    float anim_time = (time_override >= 0.0) ? time_override : (TIME * time_rate);
     vec4 disk_col_accum = vec4(0.0);
-    float dither = RandomStep(SCREEN_UV, fract(TIME * 1.0));
+    float dither = RandomStep(SCREEN_UV, fract(anim_time));
 
     float initial_dl = base_step * (max(length(x), Rs * 0.5) + 0.01 * length(x) * length(x));
     rk4_step(x, v, initial_dl * dither, L2);
@@ -412,7 +431,7 @@ void fragment() {
 
         disk_col_accum = calculate_disk_color(
             disk_col_accum,
-            time_rate,
+            anim_time,
             step_length,
             camera_world_pos,
             x,

@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://u8inby805ucp" path="res://camera_3d.gd" id="1_5vpqt"]
 [ext_resource type="Shader" uid="uid://gd3gu4hc0c3m" path="res://BlackHole.gdshader" id="1_sjfy6"]
-[ext_resource type="Texture2D" uid="uid://cdjuddtyvblls" path="res://starmap_2020_8k.exr" id="2_q56d7"]
+[ext_resource type="Material" uid="uid://qxooc2475gd5" path="res://materials/blackhole_live.tres" id="3_m0g2x"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_q3cb1"]
 render_priority = 0
@@ -11,20 +11,27 @@ shader_parameter/Rs = 0.5
 shader_parameter/gravity_strength = 1.0
 shader_parameter/steps = 64
 shader_parameter/base_step = 0.05
-shader_parameter/disk_normal_world = Vector3(0.2, 1, 0)
+shader_parameter/disk_normal_world = Vector3(0.6, 1, 0)
 shader_parameter/inter_radius_ratio = 2.5
 shader_parameter/outer_radius_ratio = 12.0
 shader_parameter/thin_ratio = 0.5
 shader_parameter/noise_scale = 1.0
 shader_parameter/noise_contrast = 80.0
 shader_parameter/time_rate = 30.0
-shader_parameter/shift_max = 1.25
-shader_parameter/disk_temperature_argument = 1.0
-shader_parameter/peak_temperature_pow4 = 1.0
-shader_parameter/disk_temp_to_rgb_scale = 1.0
-shader_parameter/disk_white_mix = 0.35
+shader_parameter/time_override = -1.0
+shader_parameter/shift_max = 1.4
+shader_parameter/disk_visual_rotate_speed = 0.08
+shader_parameter/disk_outer_spin_ratio = 0.15
+shader_parameter/disk_visual_time_scale = 0.02
+shader_parameter/disk_temperature_argument = 1.2e+19
+shader_parameter/peak_temperature_pow4 = 5.665278e+18
+shader_parameter/disk_temp_to_rgb_scale = 0.9
+shader_parameter/disk_white_mix = 0.06
 shader_parameter/disk_brightness_floor = 0.015
-shader_parameter/disk_rgb_floor = 0.004
+shader_parameter/disk_rgb_floor = 0.003
+shader_parameter/beaming_spectral_index = 0.0
+shader_parameter/beaming_strength = 1.0
+shader_parameter/beaming_clamp = 64.0
 shader_parameter/output_exposure = 1.0
 shader_parameter/bloom_threshold = 1.0
 shader_parameter/bloom_emission = 2.5
@@ -33,35 +40,8 @@ shader_parameter/bloom_emission = 2.5
 material = SubResource("ShaderMaterial_q3cb1")
 size = Vector2(2, 2)
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_5vpqt"]
-render_priority = 0
-shader = ExtResource("1_sjfy6")
-shader_parameter/Rs = 4.0
-shader_parameter/gravity_strength = 1.0
-shader_parameter/steps = 256
-shader_parameter/base_step = 0.03
-shader_parameter/sky_texture = ExtResource("2_q56d7")
-shader_parameter/disk_normal_world = Vector3(0.2, 1, 0)
-shader_parameter/inter_radius_ratio = 2.5
-shader_parameter/outer_radius_ratio = 14.0
-shader_parameter/thin_ratio = 0.62
-shader_parameter/noise_scale = 1.1
-shader_parameter/noise_contrast = 65.0
-shader_parameter/time_rate = 34.0
-shader_parameter/shift_max = 1.08
-shader_parameter/disk_temperature_argument = 2e+19
-shader_parameter/peak_temperature_pow4 = 5.665278e+18
-shader_parameter/disk_temp_to_rgb_scale = 0.55
-shader_parameter/disk_white_mix = 0.02
-shader_parameter/disk_brightness_floor = 0.002
-shader_parameter/disk_rgb_floor = 0.0
-shader_parameter/output_exposure = 1.15
-shader_parameter/bloom_threshold = 0.75
-shader_parameter/bloom_emission = 5.0
-
 [sub_resource type="Environment" id="Environment_5vpqt"]
 background_mode = 2
-background_energy_multiplier = 0.65
 ambient_light_source = 1
 ambient_light_energy = 0.03
 reflected_light_source = 1
@@ -70,10 +50,11 @@ glow_enabled = true
 glow_levels/2 = 0.95
 glow_levels/3 = 0.75
 glow_levels/4 = 0.42
-glow_levels/5 = 0.14
+glow_levels/5 = 0.15
 glow_levels/6 = 0.06
 glow_levels/7 = 0.02
 glow_intensity = 1.45
+glow_strength = 1.1
 glow_bloom = 0.5
 glow_blend_mode = 0
 glow_hdr_threshold = 0.62
@@ -86,7 +67,7 @@ adjustment_saturation = 1.3
 [node name="BlackHole" type="Node3D" unique_id=1213038861]
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1588363725]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 100)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 500)
 far = 40000.0
 script = ExtResource("1_5vpqt")
 
@@ -94,7 +75,7 @@ script = ExtResource("1_5vpqt")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 114.05853, 125.72394, -82.184296)
 extra_cull_margin = 16384.0
 mesh = SubResource("QuadMesh_yefb3")
-surface_material_override/0 = SubResource("ShaderMaterial_5vpqt")
+surface_material_override/0 = ExtResource("3_m0g2x")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1501309250]
 environment = SubResource("Environment_5vpqt")
