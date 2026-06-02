@@ -10,6 +10,8 @@ Refactor `BlackHole.gdshader` so the expensive and hard-to-maintain parts are re
 
 The first implementation should preserve the existing look as much as possible. It should make the fast paths optional through shader parameters so visual comparisons against the current shader are straightforward.
 
+The public tuning surface should be reduced to about ten artist-facing parameters for now. The current shader exposes too many controls, which makes later tuning and debugging painful. Implementation may keep additional constants internally, but the material inspector should only expose the small set that a user is expected to adjust.
+
 ## Current Context
 
 The shader is a full-screen Godot spatial shader. It currently does all work inline:
@@ -191,20 +193,50 @@ The new path should be controlled by `use_fast_noise`. The current noise path ca
 
 ## Shader Parameters
 
-Add parameters:
+Expose only the core tuning parameters in the material inspector. Target public parameters:
+
+```text
+uniform float Rs;
+uniform float gravity_strength;
+uniform int steps;
+uniform float disk_tilt;
+uniform float disk_inner_radius_ratio;
+uniform float disk_outer_radius_ratio;
+uniform float disk_thickness_ratio;
+uniform float disk_noise_amount;
+uniform float disk_temperature_scale;
+uniform float output_exposure;
+```
+
+The two LUT samplers remain shader parameters because they must be bound by the material, but they are resource bindings rather than regular tuning knobs:
 
 ```text
 uniform sampler2D blackbody_lut : filter_linear;
 uniform sampler2D far_field_deflection_lut : filter_linear;
-uniform float use_blackbody_lut = 1.0;
-uniform float use_far_field_lut = 1.0;
-uniform float use_fast_noise = 1.0;
-uniform float far_field_boundary_rs = 15.0;
-uniform float far_field_blend_width_rs = 1.0;
-uniform float blackbody_lut_max_temperature_k = 40000.0;
+uniform sampler2D sky_texture : filter_nearest;
 ```
 
-Keep existing artist-facing parameters unless they become redundant after validation.
+The following values should be internal constants or hidden implementation parameters unless debugging requires temporarily exposing them:
+
+```text
+use_blackbody_lut = 1.0
+use_far_field_lut = 1.0
+use_fast_noise = 1.0
+far_field_boundary_rs = 15.0
+far_field_blend_width_rs = 1.0
+blackbody_lut_max_temperature_k = 40000.0
+disk_white_mix
+disk_brightness_floor
+disk_rgb_floor
+beaming_spectral_index
+beaming_strength
+beaming_clamp
+bloom_threshold
+bloom_emission
+emission_soft_clip
+```
+
+The implementation should remove or stop exposing redundant parameters from `materials/blackhole_live.tres` after the new shader compiles. This is part of the refactor, not a separate cleanup pass.
 
 ## Material and Import Requirements
 
