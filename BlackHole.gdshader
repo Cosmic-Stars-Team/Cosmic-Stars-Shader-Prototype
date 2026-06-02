@@ -36,13 +36,31 @@ const float DISK_RGB_FLOOR = 0.0025;
 const float BEAMING_SPECTRAL_INDEX = 0.1;
 const float BEAMING_STRENGTH = 0.5;
 const float BEAMING_CLAMP = 15.0;
-const float BLOOM_THRESHOLD = 1.2;
-const float BLOOM_EMISSION = 2.5;
+const float BLOOM_THRESHOLD = 1.18;
+const float BLOOM_EMISSION = 3.0;
 const float USE_REINHARD_TONEMAP = 0.0;
-const float EMISSION_SOFT_CLIP = 1.0;
+const float EMISSION_SOFT_CLIP = 0.90;
+const float DISK_HAZE_CONTRAST = 0.66;
+const float DISK_OPACITY_GAIN = 1.42;
+const float DISK_CORE_OPACITY_GAIN = 1.35;
+const float LENS_SKY_BOOST = 0.25;
+const float LENS_STAR_BOOST = 5.0;
 const float FAR_FIELD_BOUNDARY_RS = 15.0;
 const float BLACKBODY_LUT_MAX_TEMPERATURE_K = 40000.0;
 const bool USE_FAR_FIELD_LUT = true;
+
+const vec3 DISK_WARM_TINT = vec3(1.00, 0.84, 0.58);
+const vec3 DISK_HOT_TINT = vec3(0.88, 0.98, 1.24);
+const vec3 DISK_RIM_TINT = vec3(0.92, 1.02, 1.30);
+const vec3 DISK_WHITE_TINT = vec3(1.04, 1.04, 1.00);
+const vec3 DISK_BLUE_RIM_EMISSION = vec3(0.26, 0.52, 1.35);
+const vec3 DISK_DUST_TINT = vec3(0.92, 0.46, 0.18);
+const vec3 DISK_SHADOW_TINT = vec3(0.58, 0.40, 0.26);
+const vec3 DISK_FILAMENT_WARM_TINT = vec3(1.16, 0.86, 0.52);
+const vec3 DISK_FILAMENT_HOT_TINT = vec3(0.78, 0.96, 1.32);
+const vec3 DISK_KEY_LIGHT_TINT = vec3(1.10, 0.96, 0.74);
+const vec3 DISK_BACK_LIGHT_TINT = vec3(0.50, 0.34, 0.24);
+const vec3 DISK_COLD_EDGE_TINT = vec3(0.54, 0.78, 1.36);
 
 const int MAX_STEPS = 512;
 
@@ -166,6 +184,15 @@ vec3 SampleBlackbodyColor(float temperature_k) {
 vec3 DiskTemperatureToRgb(float temperature_k) {
     vec3 thermal_rgb = SampleBlackbodyColor(temperature_k);
     return mix(thermal_rgb, vec3(1.0, 0.97, 0.92), DISK_WHITE_MIX);
+}
+
+float Luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+vec3 FilmicDisplay(vec3 color) {
+    vec3 safe_color = max(color, vec3(0.0));
+    return 1.0 - exp(-safe_color * 0.82);
 }
 
 float FarFieldImpactUv(float impact_parameter, float rs) {
@@ -368,6 +395,7 @@ vec4 calculate_disk_color(
             beaming = mix(1.0, min(beaming, BEAMING_CLAMP), clamp(BEAMING_STRENGTH, 0.0, 1.0));
 
             float density = Shape(effective_radius, 4.0, 0.9);
+            float noise_amount = clamp(disk_noise_amount / 1.1, 0.25, 2.5);
             float thick = 0.0;
             float vertical_mix_factor = 0.0;
             float dust_color = 0.0;
@@ -423,8 +451,8 @@ vec4 calculate_disk_color(
                 color0.xyz *= density * 1.4 * (
                     0.2 + 0.8 * vertical_mix_factor +
                     (0.8 - 0.8 * vertical_mix_factor) * strand_detail
-                );
-                color0.a *= density;
+                ) * noise_amount;
+                color0.a *= density * clamp(noise_amount, 0.35, 1.45);
             }
 
             if (abs(pos_y) < thin * (1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0))) {
@@ -443,7 +471,7 @@ vec4 calculate_disk_color(
 
                 float disk_normal_view = abs(dir_on_disk.y);
                 float dust_view = max(sqrt(max(1.0001 - dir_on_disk.y * dir_on_disk.y, 0.0)), 0.28 * smoothstep(0.35, 1.0, disk_normal_view));
-                color0 += 0.02 * vec4(vec3(dust_color), 0.2 * dust_color) *
+                color0 += 0.018 * vec4(DISK_DUST_TINT * dust_color, 0.35 * dust_color) *
                     dust_view * min(1.0, dopler * dopler);
             }
 
@@ -463,6 +491,16 @@ vec4 calculate_disk_color(
             thermal_kelvin *= disk_temperature_scale;
             thermal_kelvin = clamp(thermal_kelvin, DISK_TEMP_KELVIN_MIN, DISK_TEMP_KELVIN_MAX);
             vec3 thermal_rgb = DiskTemperatureToRgb(thermal_kelvin);
+            float radial01 = clamp((pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6), 0.0, 1.0);
+            float hot_side = smoothstep(0.98, 1.85, dopler);
+            float inner_rim = exp(-9.0 * radial01);
+            float grazing_view = smoothstep(0.18, 0.95, sqrt(max(1.0 - dir_on_disk.y * dir_on_disk.y, 0.0)));
+            float rim_light = inner_rim * (0.32 + 0.68 * grazing_view) * (0.36 + 0.64 * hot_side);
+
+            thermal_rgb *= mix(DISK_WARM_TINT, DISK_HOT_TINT, hot_side);
+            thermal_rgb = mix(thermal_rgb, DISK_RIM_TINT, 0.30 * inner_rim * hot_side);
+            float white_heat = clamp(0.18 * hot_side + 0.10 * inner_rim, 0.0, 0.28);
+            thermal_rgb = mix(thermal_rgb, DISK_WHITE_TINT, white_heat);
 
             color.xyz *= bright_without_redshift * min(1.0, 1.8 * (outer_radius - pos_r) / max(outer_radius - inter_radius, 1e-6)) * thermal_rgb;
             color.xyz *= min(SHIFT_MAX, red_shift);
@@ -474,6 +512,44 @@ vec4 calculate_disk_color(
 
             float surface_path_weight = crossed_midplane * 0.12 * smoothstep(0.35, 1.0, abs(dir_on_disk.y));
             color *= max(step_length / max(rs, 1e-6), surface_path_weight);
+            float local_luma = Luminance(color.rgb);
+            float strand_mask = smoothstep(0.0015, 0.080, local_luma);
+            float filament_core = smoothstep(0.055, 0.220, local_luma);
+            float highlight_luma = local_luma / (1.0 + local_luma * 0.85);
+            float cold_side = 1.0 - hot_side;
+            float volume_shadow = smoothstep(0.16, 0.72, color.a) * (1.0 - 0.55 * filament_core) * (0.28 + 0.72 * cold_side);
+            float optical_depth = color.a * DISK_OPACITY_GAIN * (1.0 + DISK_CORE_OPACITY_GAIN * filament_core + 0.35 * inner_rim);
+            vec3 disk_tangent = vec3(-pos_on_disk.z, 0.0, pos_on_disk.x);
+            if (length(disk_tangent) > 1e-6) {
+                disk_tangent = normalize(disk_tangent);
+            } else {
+                disk_tangent = vec3(1.0, 0.0, 0.0);
+            }
+            float tangent_view = smoothstep(0.18, 0.92, abs(dot(disk_tangent, n_to_observer)));
+            float anisotropic_filament = filament_core * strand_mask * tangent_view *
+                (0.32 + 0.68 * hot_side) * (0.45 + 0.55 * grazing_view);
+            vec3 filament_tint = mix(DISK_FILAMENT_WARM_TINT, DISK_FILAMENT_HOT_TINT, hot_side);
+            float inner_key = exp(-2.25 * radial01);
+            float key_light = smoothstep(0.78, 1.62, dopler) * (0.36 + 0.64 * inner_key) *
+                (0.48 + 0.52 * strand_mask);
+            float back_shadow = (1.0 - smoothstep(0.82, 1.18, dopler)) *
+                smoothstep(0.10, 0.82, color.a) * (0.45 + 0.55 * radial01);
+            float cold_edge = rim_light * hot_side * grazing_view * (0.35 + 0.65 * filament_core);
+            vec3 key_tint = mix(DISK_KEY_LIGHT_TINT, DISK_COLD_EDGE_TINT, hot_side);
+            color.rgb *= mix(DISK_HAZE_CONTRAST, 1.16, strand_mask);
+            color.rgb *= mix(0.92, 1.18, filament_core);
+            color.rgb *= mix(vec3(1.0), DISK_SHADOW_TINT, clamp(volume_shadow * 0.36, 0.0, 0.72));
+            color.rgb *= 1.0 + 0.34 * key_light;
+            color.rgb *= mix(vec3(1.0), DISK_BACK_LIGHT_TINT, clamp(back_shadow * 0.34, 0.0, 0.58));
+            color.rgb += key_tint * max(highlight_luma, DISK_RGB_FLOOR * color.a) * key_light * 0.62;
+            color.rgb += filament_tint * max(highlight_luma, DISK_RGB_FLOOR * color.a) * anisotropic_filament * 1.05;
+            color.rgb += DISK_COLD_EDGE_TINT * max(highlight_luma, DISK_RGB_FLOOR * color.a) * cold_edge * 0.40;
+            float lit_optical_depth = optical_depth * (1.0 + 0.10 * key_light + 0.18 * back_shadow);
+            color.a = clamp(1.0 - exp(-lit_optical_depth), 0.0, 1.0);
+            color.a = clamp(color.a + 0.045 * anisotropic_filament, 0.0, 1.0);
+            color.rgb += DISK_RIM_TINT * max(highlight_luma, DISK_RGB_FLOOR * color.a) * rim_light * 0.95;
+            float blue_rim = rim_light * hot_side * strand_mask;
+            color.rgb += DISK_BLUE_RIM_EMISSION * max(highlight_luma, DISK_RGB_FLOOR * color.a) * blue_rim * 0.82;
             color.rgb = max(color.rgb, vec3(DISK_RGB_FLOOR) * color.a * thermal_rgb);
         }
     }
@@ -504,6 +580,7 @@ void fragment() {
 
     bool hit_hole = false;
     float real_escape_radius = 500.0;
+    float min_ray_radius = length(x);
 
     float anim_time = (TIME_OVERRIDE >= 0.0) ? TIME_OVERRIDE : (TIME * TIME_RATE);
     vec4 disk_col_accum = vec4(0.0);
@@ -528,6 +605,7 @@ void fragment() {
         }
 
         float r = length(x);
+        min_ray_radius = min(min_ray_radius, r);
         if (r <= Rs) {
             hit_hole = true;
             break;
@@ -574,12 +652,19 @@ void fragment() {
         float theta = acos(clamp(ray_dir.y, -1.0, 1.0));
         vec2 uv = vec2(phi / (2.0 * PI) + 0.5, theta / PI);
         out_col = texture(sky_texture, uv).rgb;
+
+        float lens_radius = min_ray_radius / max(Rs, 1e-6);
+        float lens_strength = smoothstep(1.05, 1.55, lens_radius) * (1.0 - smoothstep(2.2, 8.5, lens_radius));
+        float sky_luma = Luminance(out_col);
+        float star_mask = smoothstep(0.015, 0.22, sky_luma);
+        out_col *= 1.0 + lens_strength * (LENS_SKY_BOOST + LENS_STAR_BOOST * star_mask);
+        out_col += vec3(0.012, 0.018, 0.030) * lens_strength * star_mask;
     }
     // Keep already-accumulated foreground disk emission even if the ray later falls into the hole.
     // The black hole only removes the sky background for that ray.
 
     float disk_a = clamp(disk_col_accum.a, 0.0, 1.0);
-    vec3 composite = mix(out_col, disk_col_accum.rgb, disk_a) * output_exposure;
+    vec3 composite = (out_col * (1.0 - disk_a) + disk_col_accum.rgb) * output_exposure;
 	if (any(isnan(composite)) || any(isinf(composite))) {
         composite = vec3(0.0); 
     }
@@ -590,12 +675,12 @@ void fragment() {
         display_col = composite / (vec3(1.0) + composite);
     }
 	
-    ALBEDO = clamp(display_col, vec3(0.0), vec3(1.0));
+    ALBEDO = clamp(FilmicDisplay(display_col), vec3(0.0), vec3(1.0));
 
-    // Bloom source from display-space color to avoid HDR blow-up.
-    vec3 bloom_src = max(display_col - vec3(BLOOM_THRESHOLD), vec3(0.0));
+    // Use the unclamped HDR composite for selective glow; ALBEDO stays filmic to avoid flat white clipping.
+    vec3 bloom_src = max(composite - vec3(BLOOM_THRESHOLD), vec3(0.0));
     if (EMISSION_SOFT_CLIP > 0.0) {
-        bloom_src = bloom_src / (vec3(EMISSION_SOFT_CLIP) + bloom_src);
+        bloom_src = bloom_src / (vec3(EMISSION_SOFT_CLIP) + bloom_src * 0.35);
     }
-EMISSION = clamp(bloom_src * BLOOM_EMISSION, vec3(0.0), vec3(128.0));
+    EMISSION = clamp(bloom_src * BLOOM_EMISSION, vec3(0.0), vec3(128.0));
 }

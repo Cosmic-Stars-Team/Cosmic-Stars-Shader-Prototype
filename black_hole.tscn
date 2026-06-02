@@ -13,7 +13,7 @@ ambient_light_source = 1
 ambient_light_energy = 0.03
 reflected_light_source = 1
 tonemap_mode = 3
-tonemap_exposure = 1.2
+tonemap_exposure = 1.32
 glow_enabled = true
 glow_levels/1 = 0.68
 glow_levels/2 = 0.43
@@ -22,16 +22,16 @@ glow_levels/4 = 0.2
 glow_levels/5 = 0.07
 glow_levels/6 = 0.028
 glow_levels/7 = 0.012
-glow_intensity = 1.6
-glow_strength = 1.2
+glow_intensity = 1.45
+glow_strength = 1.08
 glow_bloom = 1.0
 glow_blend_mode = 0
-glow_hdr_threshold = 1.23
-glow_hdr_scale = 1.27
+glow_hdr_threshold = 1.32
+glow_hdr_scale = 1.15
 glow_hdr_luminance_cap = 200.0
 glow_map_strength = 0.32
 adjustment_enabled = true
-adjustment_saturation = 2.8
+adjustment_saturation = 2.25
 
 [node name="BlackHole" type="Node3D" unique_id=1213038861]
 
