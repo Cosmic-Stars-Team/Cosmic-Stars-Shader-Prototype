@@ -58,7 +58,6 @@ const float bloom_threshold = BLOOM_THRESHOLD;
 const float bloom_emission = BLOOM_EMISSION;
 const float use_reinhard_tonemap = USE_REINHARD_TONEMAP;
 const float emission_soft_clip = EMISSION_SOFT_CLIP;
-const float noise_contrast = 72.0;
 
 const int MAX_STEPS = 512;
 
@@ -101,45 +100,45 @@ float RandomStep(vec2 input_uv, float seed) {
     return fract(sin(dot(input_uv + fract(11.4514 * sin(seed)), vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-float CubicInterpolate(float x) {
-    return 3.0 * x * x - 2.0 * x * x * x;
-}
-
-float PerlinNoise(vec3 position) {
-    vec3 pos_int = floor(position);
-    vec3 pos_float = fract(position);
-
-    float v000 = 2.0 * fract(sin(dot(vec3(pos_int.x,       pos_int.y,       pos_int.z),       vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-    float v100 = 2.0 * fract(sin(dot(vec3(pos_int.x + 1.0, pos_int.y,       pos_int.z),       vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-    float v010 = 2.0 * fract(sin(dot(vec3(pos_int.x,       pos_int.y + 1.0, pos_int.z),       vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-    float v110 = 2.0 * fract(sin(dot(vec3(pos_int.x + 1.0, pos_int.y + 1.0, pos_int.z),       vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-    float v001 = 2.0 * fract(sin(dot(vec3(pos_int.x,       pos_int.y,       pos_int.z + 1.0), vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-    float v101 = 2.0 * fract(sin(dot(vec3(pos_int.x + 1.0, pos_int.y,       pos_int.z + 1.0), vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-    float v011 = 2.0 * fract(sin(dot(vec3(pos_int.x,       pos_int.y + 1.0, pos_int.z + 1.0), vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-    float v111 = 2.0 * fract(sin(dot(vec3(pos_int.x + 1.0, pos_int.y + 1.0, pos_int.z + 1.0), vec3(12.9898, 78.233, 213.765))) * 43758.5453) - 1.0;
-
-    float v00 = v001 * CubicInterpolate(pos_float.z) + v000 * CubicInterpolate(1.0 - pos_float.z);
-    float v10 = v101 * CubicInterpolate(pos_float.z) + v100 * CubicInterpolate(1.0 - pos_float.z);
-    float v01 = v011 * CubicInterpolate(pos_float.z) + v010 * CubicInterpolate(1.0 - pos_float.z);
-    float v11 = v111 * CubicInterpolate(pos_float.z) + v110 * CubicInterpolate(1.0 - pos_float.z);
-    float v0 = v01 * CubicInterpolate(pos_float.y) + v00 * CubicInterpolate(1.0 - pos_float.y);
-    float v1 = v11 * CubicInterpolate(pos_float.y) + v10 * CubicInterpolate(1.0 - pos_float.y);
-
-    return v1 * CubicInterpolate(pos_float.x) + v0 * CubicInterpolate(1.0 - pos_float.x);
-}
-
 float SoftSaturate(float x) {
     return 1.0 - 1.0 / (max(x, 0.0) + 1.0);
 }
 
-float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise_end_level, float contrast_level) {
-    float noise_accumulator = 10.0;
-    for (int level = noise_start_level; level < noise_end_level; ++level) {
-        float noise_frequency = pow(3.0, float(level));
-        vec3 scaled_position = noise_frequency * position;
-        noise_accumulator *= (1.0 + 0.1 * PerlinNoise(scaled_position));
+vec4 HashCorners2D(vec2 cell) {
+    vec4 x = vec4(cell.x, cell.x + 1.0, cell.x, cell.x + 1.0);
+    vec4 y = vec4(cell.y, cell.y, cell.y + 1.0, cell.y + 1.0);
+    vec4 p = fract(x * 0.1031 + y * 0.0973);
+    p += dot(p, p.yzwx + 33.33);
+    return fract((p + p.yzwx) * p.wxyz);
+}
+
+float ValueNoise2D(vec2 p) {
+    vec2 cell = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    vec4 h = HashCorners2D(cell);
+    return mix(mix(h.x, h.y, u.x), mix(h.z, h.w, u.x), u.y);
+}
+
+float Fbm2D(vec2 p) {
+    float sum = 0.0;
+    float amp = 0.5;
+    mat2 rot = mat2(vec2(0.80, -0.60), vec2(0.60, 0.80));
+    for (int octave = 0; octave < 4; octave++) {
+        sum += amp * ValueNoise2D(p);
+        p = rot * p * 2.03 + vec2(11.7, 5.3);
+        amp *= 0.5;
     }
-    return log(1.0 + pow(max(0.1 * noise_accumulator, 1e-6), contrast_level));
+    return sum;
+}
+
+vec3 SampleFastDiskNoise(float radius_rs, float theta, float y_norm, float animated_time) {
+    float spiral = theta + 4.5 * log(max(radius_rs, 1.001)) - animated_time * 0.025;
+    vec2 base_uv = vec2(radius_rs * 0.33, spiral * 1.15);
+    float density = Fbm2D(base_uv);
+    float detail = Fbm2D(base_uv * 2.4 + vec2(17.0, animated_time * 0.015));
+    float dust = Fbm2D(vec2(fract(spiral / (2.0 * kPi)) * 8.0, radius_rs * 0.75 + y_norm * 0.35));
+    return mix(vec3(0.5), vec3(density, detail, dust), clamp(disk_noise_amount, 0.0, 2.0));
 }
 
 float Vec2ToTheta(vec2 v1, vec2 v2) {
@@ -341,42 +340,33 @@ vec4 calculate_disk_color(
             float rot_pos_r = pos_r / max(rs, 1e-6) +
                 0.3 * sqrt(3.0) * kSpeedOfLight / kLightYear / 3.0 / sqrt(3.0) / max(rs, 1e-6) * animated_time;
 
+            float radius_rs = pos_r / max(rs, 1e-6);
+            float y_norm = pos_y / max(thin, 1e-6);
+            vec3 fast_noise = SampleFastDiskNoise(radius_rs, pos_theta + visual_phase, y_norm, animated_time);
+            float density_noise = fast_noise.x;
+            float detail_noise = fast_noise.y;
+            float dust_noise_sample = fast_noise.z;
+
             vec4 color0 = vec4(0.0);
 
             if (abs(pos_y) < thin * density) {
-                thick = thin * density * (0.4 + 0.6 * SoftSaturate(GenerateAccretionDiskNoise(disk_noise_amount * vec3(1.5 * (pos_theta + visual_phase), rot_pos_r + 0.18 * visual_phase, 1.0), 1, 3, noise_contrast)));
+                thick = thin * density * mix(0.45, 1.05, density_noise);
                 vertical_mix_factor = max(0.0, 1.0 - abs(pos_y) / max(thick, 1e-6));
                 density *= 0.7 * vertical_mix_factor * density;
 
-                color0 = vec4(GenerateAccretionDiskNoise(disk_noise_amount * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
-
-                if (pos_theta + kPi < 0.1 * kPi) {
-                    float blend = (pos_theta + kPi) / (0.1 * kPi);
-                    color0 *= blend;
-                    color0 += (1.0 - blend) * vec4(GenerateAccretionDiskNoise(disk_noise_amount * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (2.0 * kPi + pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
-                }
+                float cloud_value = mix(density_noise, detail_noise, 0.55);
+                color0 = vec4(vec3(cloud_value), cloud_value);
 
                 color0.xyz *= density * 1.4 * (
                     0.2 + 0.8 * vertical_mix_factor +
-                    (0.8 - 0.8 * vertical_mix_factor) *
-                    GenerateAccretionDiskNoise(disk_noise_amount * vec3(rot_pos_r + 0.12 * visual_phase, 1.5 * (pos_theta + visual_phase), pos_y / max(min(rs, thin / 0.1), 1e-6)), 1, 3, noise_contrast)
+                    (0.8 - 0.8 * vertical_mix_factor) * detail_noise
                 );
                 color0.a *= density;
             }
 
             if (abs(pos_y) < thin * (1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0))) {
                 float denom3 = thin * max(1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0), 0.0001);
-                dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) *
-                    GenerateAccretionDiskNoise(
-                        disk_noise_amount * vec3(
-                            1.5 * fract((1.5 * pos_theta_for_inner_cloud + kPi / max(half_pi_time_inside, 1e-6) * animated_time + visual_phase) / (2.0 * kPi)) * 2.0 * kPi,
-                            pos_r / max(rs, 1e-6),
-                            pos_y / max(min(rs, thin / 0.1), 1e-6)
-                        ),
-                        0,
-                        6,
-                        noise_contrast
-                    );
+                dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) * dust_noise_sample;
 
                 color0 += 0.02 * vec4(vec3(dust_color), 0.2 * dust_color) *
                     sqrt(max(1.0001 - dir_on_disk.y * dir_on_disk.y, 0.0)) * min(1.0, dopler * dopler);
