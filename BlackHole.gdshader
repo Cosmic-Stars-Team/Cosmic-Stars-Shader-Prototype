@@ -24,6 +24,8 @@ const float SHIFT_MAX = 2.6;
 const float DISK_VISUAL_ROTATE_SPEED = 0.18;
 const float DISK_OUTER_SPIN_RATIO = 0.6;
 const float DISK_VISUAL_TIME_SCALE = 0.02;
+const float DISK_NOISE_SCALE = 1.1;
+const float DISK_NOISE_CONTRAST = 72.0;
 const float DISK_TEMPERATURE_ARGUMENT = 1.4e19;
 const float PEAK_TEMPERATURE_POW4 = 5.665278e18;
 const float DISK_TEMP_KELVIN_MIN = 1200.0;
@@ -77,44 +79,54 @@ void rk4_step(inout vec3 x, inout vec3 v, float dl, float L2) {
 }
 
 float RandomStep(vec2 input_uv, float seed) {
-    return fract(sin(dot(input_uv + fract(11.4514 * sin(seed)), vec2(12.9898, 78.233))) * 43758.5453);
+    vec3 p = fract(vec3(input_uv, seed) * vec3(0.1031, 0.0973, 0.1099));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
 }
 
-vec4 HashCorners2D(vec2 cell) {
+float CubicInterpolate(float x) {
+    return 3.0 * x * x - 2.0 * x * x * x;
+}
+
+void HashCorners3D(vec3 cell, out vec4 z0, out vec4 z1) {
     vec4 x = vec4(cell.x, cell.x + 1.0, cell.x, cell.x + 1.0);
     vec4 y = vec4(cell.y, cell.y, cell.y + 1.0, cell.y + 1.0);
-    vec4 p = fract(x * 0.1031 + y * 0.0973);
-    p += dot(p, p.yzwx + 33.33);
-    return fract((p + p.yzwx) * p.wxyz);
+    vec4 p0 = fract(vec4(cell.z) * 0.1099 + x * 0.1031 + y * 0.0973);
+    vec4 p1 = fract(vec4(cell.z + 1.0) * 0.1099 + x * 0.1031 + y * 0.0973);
+
+    p0 += dot(p0, p0.yzwx + 33.33);
+    p1 += dot(p1, p1.yzwx + 33.33);
+
+    z0 = fract((p0 + p0.yzwx) * p0.wxyz) * 2.0 - 1.0;
+    z1 = fract((p1 + p1.yzwx) * p1.wxyz) * 2.0 - 1.0;
 }
 
-float ValueNoise2D(vec2 p) {
-    vec2 cell = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    vec4 h = HashCorners2D(cell);
-    return mix(mix(h.x, h.y, u.x), mix(h.z, h.w, u.x), u.y);
+float PerlinNoise(vec3 position) {
+    vec3 pos_int = floor(position);
+    vec3 pos_float = fract(position);
+
+    vec4 z0;
+    vec4 z1;
+    HashCorners3D(pos_int, z0, z1);
+
+    vec3 u = pos_float * pos_float * (3.0 - 2.0 * pos_float);
+    vec4 z_mix = mix(z0, z1, u.z);
+    vec2 y_mix = mix(z_mix.xy, z_mix.zw, u.y);
+    return mix(y_mix.x, y_mix.y, u.x);
 }
 
-float Fbm2D(vec2 p) {
-    float sum = 0.0;
-    float amp = 0.5;
-    mat2 rot = mat2(vec2(0.80, -0.60), vec2(0.60, 0.80));
-    for (int octave = 0; octave < 4; octave++) {
-        sum += amp * ValueNoise2D(p);
-        p = rot * p * 2.03 + vec2(11.7, 5.3);
-        amp *= 0.5;
+float SoftSaturate(float x) {
+    return 1.0 - 1.0 / (max(x, 0.0) + 1.0);
+}
+
+float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise_end_level, float contrast_level) {
+    float noise_accumulator = 10.0;
+    for (int level = noise_start_level; level < noise_end_level; ++level) {
+        float noise_frequency = pow(3.0, float(level));
+        vec3 scaled_position = noise_frequency * position;
+        noise_accumulator *= (1.0 + 0.1 * PerlinNoise(scaled_position));
     }
-    return sum;
-}
-
-vec3 SampleFastDiskNoise(float radius_rs, float theta, float y_norm, float animated_time) {
-    float spiral = theta + 4.5 * log(max(radius_rs, 1.001)) - animated_time * 0.025;
-    vec2 base_uv = vec2(radius_rs * 0.33, spiral * 1.15);
-    float density = Fbm2D(base_uv);
-    float detail = Fbm2D(base_uv * 2.4 + vec2(17.0, animated_time * 0.015));
-    float dust = Fbm2D(vec2(fract(spiral / (2.0 * kPi)) * 8.0, radius_rs * 0.75 + y_norm * 0.35));
-    return clamp(mix(vec3(0.5), vec3(density, detail, dust), clamp(disk_noise_amount, 0.0, 2.0)), vec3(0.0), vec3(1.0));
+    return log(1.0 + pow(max(0.1 * noise_accumulator, 1e-6), contrast_level));
 }
 
 float Vec2ToTheta(vec2 v1, vec2 v2) {
@@ -280,12 +292,24 @@ vec4 calculate_disk_color(
     float pos_r = length(pos_on_disk.zx);
     float pos_y = pos_on_disk.y;
     float last_pos_y = last_pos_on_disk.y;
+    float crossed_midplane = 0.0;
 
     if (last_pos_y * pos_y < 0.0) {
         float denom = pos_y - last_pos_y;
         if (abs(denom) > 1e-6) {
             vec3 c_point = (-pos_on_disk * last_pos_y + last_pos_on_disk * pos_y) / denom;
-            pos_on_disk = c_point + min(thin, length(c_point - last_pos_on_disk)) * dir_on_disk *
+            crossed_midplane = 1.0;
+            vec3 disk_plane_jitter_dir = vec3(dir_on_disk.x, 0.0, dir_on_disk.z);
+            if (length(disk_plane_jitter_dir) < 1e-6) {
+                disk_plane_jitter_dir = vec3(-c_point.z, 0.0, c_point.x);
+            }
+            if (length(disk_plane_jitter_dir) < 1e-6) {
+                disk_plane_jitter_dir = vec3(1.0, 0.0, 0.0);
+            }
+            disk_plane_jitter_dir = normalize(disk_plane_jitter_dir);
+            float plane_jitter_mix = smoothstep(0.35, 0.95, abs(dir_on_disk.y));
+            vec3 jitter_dir = normalize(mix(dir_on_disk, disk_plane_jitter_dir, plane_jitter_mix));
+            pos_on_disk = c_point + min(thin, length(c_point - last_pos_on_disk)) * jitter_dir *
                 (-1.0 + 2.0 * RandomStep(10000000000.0 * pos_on_disk.zx, fract(animated_time + 0.5)));
 
             step_length = length(pos_on_disk - last_pos_on_disk);
@@ -319,8 +343,11 @@ vec4 calculate_disk_color(
             (pos_y < thin * (1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0)))
         ) {
             float angular_velocity = GetKeplerianAngularVelocity(pos_r, rs);
+            float half_pi_time_inside = kPi / max(GetKeplerianAngularVelocity(3.0 * rs, rs), 1e-6);
 
             float spiral_theta = 12.0 * 2.0 / sqrt(3.0) * atan(sqrt(max(0.6666666 * (pos_r / max(rs, 1e-6)) - 1.0, 0.0)));
+            float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * animated_time;
+            float pos_theta_for_inner_cloud = Vec2ToTheta(pos_on_disk.zx, vec2(cos(0.666666 * inner_theta), sin(0.666666 * inner_theta)));
             float pos_theta = Vec2ToTheta(pos_on_disk.zx, vec2(cos(-spiral_theta), sin(-spiral_theta)));
 
             float disk_temperature = pow(
@@ -350,36 +377,74 @@ vec4 calculate_disk_color(
             float radius_spin_mix = mix(DISK_OUTER_SPIN_RATIO, 1.0, radius_ratio);
             float visual_phase = animated_time * DISK_VISUAL_ROTATE_SPEED * DISK_VISUAL_TIME_SCALE * radius_spin_mix;
 
-            float radius_rs = pos_r / max(rs, 1e-6);
-            float y_norm = pos_y / max(thin, 1e-6);
-            vec3 fast_noise = SampleFastDiskNoise(radius_rs, pos_theta + visual_phase, y_norm, animated_time);
-            float density_noise = fast_noise.x;
-            float detail_noise = fast_noise.y;
-            float dust_noise_sample = fast_noise.z;
+            float rot_pos_r = pos_r / max(rs, 1e-6) +
+                0.3 * sqrt(3.0) * kSpeedOfLight / kLightYear / 3.0 / sqrt(3.0) / max(rs, 1e-6) * animated_time;
+            float vertical_domain = pos_y / max(min(rs, thin / 0.1), 1e-6);
 
             vec4 color0 = vec4(0.0);
 
             if (abs(pos_y) < thin * density) {
-                thick = thin * density * mix(0.45, 1.05, density_noise);
+                float thickness_noise = SoftSaturate(GenerateAccretionDiskNoise(
+                    DISK_NOISE_SCALE * vec3(1.5 * (pos_theta + visual_phase), rot_pos_r + 0.18 * visual_phase, 1.0),
+                    1,
+                    3,
+                    DISK_NOISE_CONTRAST
+                ));
+                thick = thin * density * (0.4 + 0.6 * thickness_noise);
                 vertical_mix_factor = max(0.0, 1.0 - abs(pos_y) / max(thick, 1e-6));
                 density *= 0.7 * vertical_mix_factor * density;
 
-                float cloud_value = mix(density_noise, detail_noise, 0.55);
+                float cloud_value = GenerateAccretionDiskNoise(
+                    DISK_NOISE_SCALE * vec3(rot_pos_r + 0.22 * visual_phase, vertical_domain, 0.5 * (pos_theta + 0.7 * visual_phase)),
+                    3,
+                    6,
+                    DISK_NOISE_CONTRAST
+                );
+
+                if (pos_theta + kPi < 0.1 * kPi) {
+                    float blend = (pos_theta + kPi) / (0.1 * kPi);
+                    float wrapped_cloud = GenerateAccretionDiskNoise(
+                        DISK_NOISE_SCALE * vec3(rot_pos_r + 0.22 * visual_phase, vertical_domain, 0.5 * (2.0 * kPi + pos_theta + 0.7 * visual_phase)),
+                        3,
+                        6,
+                        DISK_NOISE_CONTRAST
+                    );
+                    cloud_value = mix(wrapped_cloud, cloud_value, blend);
+                }
+
                 color0 = vec4(vec3(cloud_value), cloud_value);
 
+                float strand_detail = GenerateAccretionDiskNoise(
+                    DISK_NOISE_SCALE * vec3(rot_pos_r + 0.12 * visual_phase, 1.5 * (pos_theta + visual_phase), vertical_domain),
+                    1,
+                    3,
+                    DISK_NOISE_CONTRAST
+                );
                 color0.xyz *= density * 1.4 * (
                     0.2 + 0.8 * vertical_mix_factor +
-                    (0.8 - 0.8 * vertical_mix_factor) * detail_noise
+                    (0.8 - 0.8 * vertical_mix_factor) * strand_detail
                 );
                 color0.a *= density;
             }
 
             if (abs(pos_y) < thin * (1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0))) {
                 float denom3 = thin * max(1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0), 0.0001);
-                dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) * dust_noise_sample;
+                float dust_noise = GenerateAccretionDiskNoise(
+                    DISK_NOISE_SCALE * vec3(
+                        1.5 * fract((1.5 * pos_theta_for_inner_cloud + kPi / max(half_pi_time_inside, 1e-6) * animated_time + visual_phase) / (2.0 * kPi)) * 2.0 * kPi,
+                        pos_r / max(rs, 1e-6),
+                        vertical_domain
+                    ),
+                    0,
+                    6,
+                    DISK_NOISE_CONTRAST
+                );
+                dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) * dust_noise;
 
+                float disk_normal_view = abs(dir_on_disk.y);
+                float dust_view = max(sqrt(max(1.0001 - dir_on_disk.y * dir_on_disk.y, 0.0)), 0.28 * smoothstep(0.35, 1.0, disk_normal_view));
                 color0 += 0.02 * vec4(vec3(dust_color), 0.2 * dust_color) *
-                    sqrt(max(1.0001 - dir_on_disk.y * dir_on_disk.y, 0.0)) * min(1.0, dopler * dopler);
+                    dust_view * min(1.0, dopler * dopler);
             }
 
             color = color0;
@@ -407,7 +472,8 @@ vec4 calculate_disk_color(
             color.xyz *= pow(abs(1.0 - (1.0 - min(1.0, red_shift)) * (pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6)), 9.0);
             color.xyz *= min(1.0, 1.0 + 0.5 * ((pos_r - inter_radius) / max(inter_radius, 1e-6) + inter_radius / max(pos_r - inter_radius, 1e-6)) - max(1.0, red_shift));
 
-            color *= step_length / max(rs, 1e-6);
+            float surface_path_weight = crossed_midplane * 0.12 * smoothstep(0.35, 1.0, abs(dir_on_disk.y));
+            color *= max(step_length / max(rs, 1e-6), surface_path_weight);
             color.rgb = max(color.rgb, vec3(DISK_RGB_FLOOR) * color.a * thermal_rgb);
         }
     }
@@ -509,14 +575,8 @@ void fragment() {
         vec2 uv = vec2(phi / (2.0 * PI) + 0.5, theta / PI);
         out_col = texture(sky_texture, uv).rgb;
     }
-	if (hit_hole) {
-        // 既然这根光线最终跌入了黑洞，那无论它在路上穿过了多亮的前景气体，
-        // 我们都强行剥夺它的亮度，或者对其进行极大的衰减。
-        // 乘以 0.0 代表完全抹除前景气体，黑球将呈现绝对的纯黑和完美边缘；
-        // 乘以 0.05 代表保留极微弱的前景气体质感。你可以自己权衡这个艺术值。
-        disk_col_accum.rgb *= 0.0; 
-        disk_col_accum.a *= 0.0; 
-    }
+    // Keep already-accumulated foreground disk emission even if the ray later falls into the hole.
+    // The black hole only removes the sky background for that ray.
 
     float disk_a = clamp(disk_col_accum.a, 0.0, 1.0);
     vec3 composite = mix(out_col, disk_col_accum.rgb, disk_a) * output_exposure;
