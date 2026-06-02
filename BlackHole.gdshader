@@ -2,47 +2,71 @@ shader_type spatial;
 
 render_mode unshaded, cull_disabled, depth_test_disabled, depth_draw_never;
 
-uniform float Rs = 0.5;
+uniform float Rs = 4.0;
 uniform float gravity_strength = 1.0;
-uniform int steps = 256;
-uniform float base_step = 0.05;
+uniform int steps = 512;
+uniform float disk_tilt = -0.3;
+uniform float disk_inner_radius_ratio = 2.5;
+uniform float disk_outer_radius_ratio = 7.6;
+uniform float disk_thickness_ratio = 0.62;
+uniform float disk_noise_amount = 1.0;
+uniform float disk_temperature_scale = 0.71;
+uniform float output_exposure = 0.9;
+
 uniform sampler2D sky_texture : filter_nearest;
+uniform sampler2D blackbody_lut : filter_linear;
+uniform sampler2D far_field_deflection_lut : filter_linear;
 
-// Disk orientation and shape
-uniform vec3 disk_normal_world = vec3(0.2, 1.0, 0.0);
-uniform float inter_radius_ratio = 2.5;
-uniform float outer_radius_ratio = 12.0;
-uniform float thin_ratio = 0.5;
+const float BASE_STEP = 0.02;
+const float TIME_RATE = 8.0;
+const float TIME_OVERRIDE = -1.0;
+const float SHIFT_MAX = 2.6;
+const float DISK_VISUAL_ROTATE_SPEED = 0.18;
+const float DISK_OUTER_SPIN_RATIO = 0.6;
+const float DISK_VISUAL_TIME_SCALE = 0.02;
+const float DISK_TEMPERATURE_ARGUMENT = 1.4e19;
+const float PEAK_TEMPERATURE_POW4 = 5.665278e18;
+const float DISK_TEMP_KELVIN_MIN = 1200.0;
+const float DISK_TEMP_KELVIN_MAX = 18000.0;
+const float DISK_WHITE_MIX = 0.002;
+const float DISK_BRIGHTNESS_FLOOR = 0.0045;
+const float DISK_RGB_FLOOR = 0.0025;
+const float BEAMING_SPECTRAL_INDEX = 0.1;
+const float BEAMING_STRENGTH = 0.5;
+const float BEAMING_CLAMP = 15.0;
+const float BLOOM_THRESHOLD = 1.2;
+const float BLOOM_EMISSION = 2.5;
+const float USE_REINHARD_TONEMAP = 0.0;
+const float EMISSION_SOFT_CLIP = 1.0;
+const float FAR_FIELD_BOUNDARY_RS = 15.0;
+const float FAR_FIELD_BLEND_WIDTH_RS = 1.0;
+const float BLACKBODY_LUT_MAX_TEMPERATURE_K = 40000.0;
+const bool USE_BLACKBODY_LUT = true;
+const bool USE_FAR_FIELD_LUT = true;
+const bool USE_FAST_NOISE = true;
 
-// Noise and disk dynamics
-uniform float noise_scale = 1.0;
-uniform float noise_contrast = 80.0;
-uniform float time_rate = 30.0;
-uniform float time_override = -1.0;
-uniform float shift_max = 1.25;
-uniform float disk_visual_rotate_speed = 0.18;
-uniform float disk_outer_spin_ratio = 0.55;
-uniform float disk_visual_time_scale = 0.02;
-
-// Temperature/brightness chain controls
-uniform float disk_temperature_argument = 1e20;
-uniform float peak_temperature_pow4 = 5.665278e18;
-uniform float disk_temp_to_rgb_scale = 1.0;
-uniform float disk_temp_kelvin_min = 800.0;
-uniform float disk_temp_kelvin_max = 22000.0;
-uniform float disk_white_mix = 0.0;
-uniform float disk_brightness_floor = 0.002;
-uniform float disk_rgb_floor = 0.0;
-uniform float beaming_spectral_index = 0.0;
-uniform float beaming_strength = 1.0;
-uniform float beaming_clamp = 12.0;
-
-// Output to Godot post chain
-uniform float output_exposure = 1.0;
-uniform float bloom_threshold = 1.0;
-uniform float bloom_emission = 2.5;
-uniform float use_reinhard_tonemap = 1.0;
-uniform float emission_soft_clip = 1.0;
+const float base_step = BASE_STEP;
+const float time_rate = TIME_RATE;
+const float time_override = TIME_OVERRIDE;
+const float shift_max = SHIFT_MAX;
+const float disk_visual_rotate_speed = DISK_VISUAL_ROTATE_SPEED;
+const float disk_outer_spin_ratio = DISK_OUTER_SPIN_RATIO;
+const float disk_visual_time_scale = DISK_VISUAL_TIME_SCALE;
+const float disk_temperature_argument = DISK_TEMPERATURE_ARGUMENT;
+const float peak_temperature_pow4 = PEAK_TEMPERATURE_POW4;
+const float disk_temp_kelvin_min = DISK_TEMP_KELVIN_MIN;
+const float disk_temp_kelvin_max = DISK_TEMP_KELVIN_MAX;
+const float disk_white_mix = DISK_WHITE_MIX;
+const float disk_brightness_floor = DISK_BRIGHTNESS_FLOOR;
+const float disk_rgb_floor = DISK_RGB_FLOOR;
+const float beaming_spectral_index = BEAMING_SPECTRAL_INDEX;
+const float beaming_strength = BEAMING_STRENGTH;
+const float beaming_clamp = BEAMING_CLAMP;
+const float bloom_threshold = BLOOM_THRESHOLD;
+const float bloom_emission = BLOOM_EMISSION;
+const float use_reinhard_tonemap = USE_REINHARD_TONEMAP;
+const float emission_soft_clip = EMISSION_SOFT_CLIP;
+const float noise_contrast = 72.0;
 
 const int MAX_STEPS = 512;
 
@@ -308,22 +332,22 @@ vec4 calculate_disk_color(
             vec4 color0 = vec4(0.0);
 
             if (abs(pos_y) < thin * density) {
-                thick = thin * density * (0.4 + 0.6 * SoftSaturate(GenerateAccretionDiskNoise(noise_scale * vec3(1.5 * (pos_theta + visual_phase), rot_pos_r + 0.18 * visual_phase, 1.0), 1, 3, noise_contrast)));
+                thick = thin * density * (0.4 + 0.6 * SoftSaturate(GenerateAccretionDiskNoise(disk_noise_amount * vec3(1.5 * (pos_theta + visual_phase), rot_pos_r + 0.18 * visual_phase, 1.0), 1, 3, noise_contrast)));
                 vertical_mix_factor = max(0.0, 1.0 - abs(pos_y) / max(thick, 1e-6));
                 density *= 0.7 * vertical_mix_factor * density;
 
-                color0 = vec4(GenerateAccretionDiskNoise(noise_scale * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
+                color0 = vec4(GenerateAccretionDiskNoise(disk_noise_amount * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
 
                 if (pos_theta + kPi < 0.1 * kPi) {
                     float blend = (pos_theta + kPi) / (0.1 * kPi);
                     color0 *= blend;
-                    color0 += (1.0 - blend) * vec4(GenerateAccretionDiskNoise(noise_scale * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (2.0 * kPi + pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
+                    color0 += (1.0 - blend) * vec4(GenerateAccretionDiskNoise(disk_noise_amount * vec3(1.0 * rot_pos_r + 0.22 * visual_phase, 1.0 * pos_y / max(min(rs, thin / 0.1), 1e-6), 0.5 * (2.0 * kPi + pos_theta + 0.7 * visual_phase)), 3, 6, noise_contrast));
                 }
 
                 color0.xyz *= density * 1.4 * (
                     0.2 + 0.8 * vertical_mix_factor +
                     (0.8 - 0.8 * vertical_mix_factor) *
-                    GenerateAccretionDiskNoise(noise_scale * vec3(rot_pos_r + 0.12 * visual_phase, 1.5 * (pos_theta + visual_phase), pos_y / max(min(rs, thin / 0.1), 1e-6)), 1, 3, noise_contrast)
+                    GenerateAccretionDiskNoise(disk_noise_amount * vec3(rot_pos_r + 0.12 * visual_phase, 1.5 * (pos_theta + visual_phase), pos_y / max(min(rs, thin / 0.1), 1e-6)), 1, 3, noise_contrast)
                 );
                 color0.a *= density;
             }
@@ -332,7 +356,7 @@ vec4 calculate_disk_color(
                 float denom3 = thin * max(1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0), 0.0001);
                 dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) *
                     GenerateAccretionDiskNoise(
-                        noise_scale * vec3(
+                        disk_noise_amount * vec3(
                             1.5 * fract((1.5 * pos_theta_for_inner_cloud + kPi / max(half_pi_time_inside, 1e-6) * animated_time + visual_phase) / (2.0 * kPi)) * 2.0 * kPi,
                             pos_r / max(rs, 1e-6),
                             pos_y / max(min(rs, thin / 0.1), 1e-6)
@@ -359,7 +383,7 @@ vec4 calculate_disk_color(
             bright_without_redshift = max(bright_without_redshift, disk_brightness_floor);
 
             float thermal_kelvin = disk_temperature / exp((pos_r - inter_radius) / (0.6 * max(outer_radius - inter_radius, 1e-6)));
-            thermal_kelvin *= disk_temp_to_rgb_scale;
+            thermal_kelvin *= disk_temperature_scale;
             thermal_kelvin = clamp(thermal_kelvin, disk_temp_kelvin_min, disk_temp_kelvin_max);
             vec3 thermal_rgb = KelvinToRgb(thermal_kelvin);
             thermal_rgb = mix(thermal_rgb, vec3(1.0, 0.97, 0.92), clamp(disk_white_mix, 0.0, 1.0));
@@ -407,15 +431,15 @@ void fragment() {
     float initial_dl = base_step * (max(length(x), Rs * 0.5) + 0.01 * length(x) * length(x));
     rk4_step(x, v, initial_dl * dither, L2);
 
-    float inter_radius = inter_radius_ratio * Rs;
-    float outer_radius = outer_radius_ratio * Rs;
-    float thin = thin_ratio * Rs;
+    float inter_radius = disk_inner_radius_ratio * Rs;
+    float outer_radius = disk_outer_radius_ratio * Rs;
+    float thin = disk_thickness_ratio * Rs;
 
     vec3 last_ray_pos = x;
     vec3 last_ray_dir = v;
     float step_length = 0.0;
 
-    vec3 disk_normal = normalize(disk_normal_world);
+    vec3 disk_normal = normalize(vec3(disk_tilt, 1.0, 0.0));
     vec3 world_up = vec3(0.0, 1.0, 0.0);
 
     for (int i = 0; i < MAX_STEPS; i++) {

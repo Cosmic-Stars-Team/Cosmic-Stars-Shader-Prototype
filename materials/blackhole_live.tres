@@ -2,6 +2,8 @@
 
 [ext_resource type="Shader" uid="uid://gd3gu4hc0c3m" path="res://BlackHole.gdshader" id="1_sjfy6"]
 [ext_resource type="Texture2D" uid="uid://cdjuddtyvblls" path="res://starmap_2020_8k.exr" id="2_q56d7"]
+[ext_resource type="Texture2D" path="res://lud/blackbody_1d_lut_4k.exr" id="3_bbody"]
+[ext_resource type="Texture2D" path="res://lud/far_field_ray_deflection_lut_rs1_4096.exr" id="4_farfield"]
 
 [resource]
 render_priority = 0
@@ -9,33 +11,13 @@ shader = ExtResource("1_sjfy6")
 shader_parameter/Rs = 4.0
 shader_parameter/gravity_strength = 1.0
 shader_parameter/steps = 512
-shader_parameter/base_step = 0.02
-shader_parameter/sky_texture = ExtResource("2_q56d7")
-shader_parameter/disk_normal_world = Vector3(-0.3, 1, 0)
-shader_parameter/inter_radius_ratio = 2.5
-shader_parameter/outer_radius_ratio = 7.6
-shader_parameter/thin_ratio = 0.62
-shader_parameter/noise_scale = 1.1
-shader_parameter/noise_contrast = 72.0
-shader_parameter/time_rate = 8.0
-shader_parameter/time_override = -1.0
-shader_parameter/shift_max = 2.6
-shader_parameter/disk_visual_rotate_speed = 0.18
-shader_parameter/disk_outer_spin_ratio = 0.6
-shader_parameter/disk_visual_time_scale = 0.02
-shader_parameter/disk_temperature_argument = 1.4e+19
-shader_parameter/peak_temperature_pow4 = 5.665278e+18
-shader_parameter/disk_temp_to_rgb_scale = 0.71
-shader_parameter/disk_temp_kelvin_min = 1200.0
-shader_parameter/disk_temp_kelvin_max = 18000.0
-shader_parameter/disk_white_mix = 0.002
-shader_parameter/disk_brightness_floor = 0.0045
-shader_parameter/disk_rgb_floor = 0.0025
-shader_parameter/beaming_spectral_index = 0.1
-shader_parameter/beaming_strength = 0.5
-shader_parameter/beaming_clamp = 15.0
+shader_parameter/disk_tilt = -0.3
+shader_parameter/disk_inner_radius_ratio = 2.5
+shader_parameter/disk_outer_radius_ratio = 7.6
+shader_parameter/disk_thickness_ratio = 0.62
+shader_parameter/disk_noise_amount = 1.0
+shader_parameter/disk_temperature_scale = 0.71
 shader_parameter/output_exposure = 0.9
-shader_parameter/bloom_threshold = 1.2
-shader_parameter/bloom_emission = 2.5
-shader_parameter/use_reinhard_tonemap = 0.0
-shader_parameter/emission_soft_clip = 1.0
+shader_parameter/sky_texture = ExtResource("2_q56d7")
+shader_parameter/blackbody_lut = ExtResource("3_bbody")
+shader_parameter/far_field_deflection_lut = ExtResource("4_farfield")
