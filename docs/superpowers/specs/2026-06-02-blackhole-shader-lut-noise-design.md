@@ -222,6 +222,7 @@ The following values should be internal constants or hidden implementation param
 use_blackbody_lut = 1.0
 use_far_field_lut = 1.0
 use_fast_noise = 1.0
+time_override = -1.0
 far_field_boundary_rs = 15.0
 far_field_blend_width_rs = 1.0
 blackbody_lut_max_temperature_k = 40000.0
