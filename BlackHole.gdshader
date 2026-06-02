@@ -100,10 +100,6 @@ float RandomStep(vec2 input_uv, float seed) {
     return fract(sin(dot(input_uv + fract(11.4514 * sin(seed)), vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-float SoftSaturate(float x) {
-    return 1.0 - 1.0 / (max(x, 0.0) + 1.0);
-}
-
 vec4 HashCorners2D(vec2 cell) {
     vec4 x = vec4(cell.x, cell.x + 1.0, cell.x, cell.x + 1.0);
     vec4 y = vec4(cell.y, cell.y, cell.y + 1.0, cell.y + 1.0);
@@ -138,7 +134,7 @@ vec3 SampleFastDiskNoise(float radius_rs, float theta, float y_norm, float anima
     float density = Fbm2D(base_uv);
     float detail = Fbm2D(base_uv * 2.4 + vec2(17.0, animated_time * 0.015));
     float dust = Fbm2D(vec2(fract(spiral / (2.0 * kPi)) * 8.0, radius_rs * 0.75 + y_norm * 0.35));
-    return mix(vec3(0.5), vec3(density, detail, dust), clamp(disk_noise_amount, 0.0, 2.0));
+    return clamp(mix(vec3(0.5), vec3(density, detail, dust), clamp(disk_noise_amount, 0.0, 2.0)), vec3(0.0), vec3(1.0));
 }
 
 float Vec2ToTheta(vec2 v1, vec2 v2) {
@@ -336,9 +332,6 @@ vec4 calculate_disk_color(
             float radius_ratio = clamp(inter_radius / max(pos_r, 1e-6), 0.0, 1.0);
             float radius_spin_mix = mix(disk_outer_spin_ratio, 1.0, radius_ratio);
             float visual_phase = animated_time * disk_visual_rotate_speed * disk_visual_time_scale * radius_spin_mix;
-
-            float rot_pos_r = pos_r / max(rs, 1e-6) +
-                0.3 * sqrt(3.0) * kSpeedOfLight / kLightYear / 3.0 / sqrt(3.0) / max(rs, 1e-6) * animated_time;
 
             float radius_rs = pos_r / max(rs, 1e-6);
             float y_norm = pos_y / max(thin, 1e-6);
