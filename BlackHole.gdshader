@@ -299,11 +299,8 @@ vec4 calculate_disk_color(
             (pos_y < thin * (1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0)))
         ) {
             float angular_velocity = GetKeplerianAngularVelocity(pos_r, rs);
-            float half_pi_time_inside = kPi / max(GetKeplerianAngularVelocity(3.0 * rs, rs), 1e-6);
 
             float spiral_theta = 12.0 * 2.0 / sqrt(3.0) * atan(sqrt(max(0.6666666 * (pos_r / max(rs, 1e-6)) - 1.0, 0.0)));
-            float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * animated_time;
-            float pos_theta_for_inner_cloud = Vec2ToTheta(pos_on_disk.zx, vec2(cos(0.666666 * inner_theta), sin(0.666666 * inner_theta)));
             float pos_theta = Vec2ToTheta(pos_on_disk.zx, vec2(cos(-spiral_theta), sin(-spiral_theta)));
 
             float disk_temperature = pow(
