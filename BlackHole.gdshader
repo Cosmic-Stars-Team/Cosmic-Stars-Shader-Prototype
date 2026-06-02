@@ -54,14 +54,6 @@ const float disk_outer_spin_ratio = DISK_OUTER_SPIN_RATIO;
 const float disk_visual_time_scale = DISK_VISUAL_TIME_SCALE;
 const float disk_temperature_argument = DISK_TEMPERATURE_ARGUMENT;
 const float peak_temperature_pow4 = PEAK_TEMPERATURE_POW4;
-const float disk_temp_kelvin_min = DISK_TEMP_KELVIN_MIN;
-const float disk_temp_kelvin_max = DISK_TEMP_KELVIN_MAX;
-const float disk_white_mix = DISK_WHITE_MIX;
-const float disk_brightness_floor = DISK_BRIGHTNESS_FLOOR;
-const float disk_rgb_floor = DISK_RGB_FLOOR;
-const float beaming_spectral_index = BEAMING_SPECTRAL_INDEX;
-const float beaming_strength = BEAMING_STRENGTH;
-const float beaming_clamp = BEAMING_CLAMP;
 const float bloom_threshold = BLOOM_THRESHOLD;
 const float bloom_emission = BLOOM_EMISSION;
 const float use_reinhard_tonemap = USE_REINHARD_TONEMAP;
@@ -167,6 +159,28 @@ float Vec2ToTheta(vec2 v1, vec2 v2) {
     return angle;
 }
 
+float MapTemperatureToBlackbodyUv(float temperature_k) {
+    float t = clamp(temperature_k, 0.0, BLACKBODY_LUT_MAX_TEMPERATURE_K);
+    if (t <= 12000.0) {
+        return 0.85 * (t / 12000.0);
+    }
+    if (t <= 20000.0) {
+        return 0.85 + 0.10 * ((t - 12000.0) / 8000.0);
+    }
+    return 0.95 + 0.05 * ((t - 20000.0) / 20000.0);
+}
+
+vec3 SampleBlackbodyColor(float temperature_k) {
+    float uv_x = MapTemperatureToBlackbodyUv(temperature_k);
+    vec3 rgb = texture(blackbody_lut, vec2(uv_x, 0.5)).rgb;
+    return max(rgb, vec3(0.0));
+}
+
+vec3 DiskTemperatureToRgb(float temperature_k) {
+    vec3 thermal_rgb = USE_BLACKBODY_LUT ? SampleBlackbodyColor(temperature_k) : KelvinToRgb(temperature_k);
+    return mix(thermal_rgb, vec3(1.0, 0.97, 0.92), DISK_WHITE_MIX);
+}
+
 vec3 KelvinToRgb(float kelvin) {
     if (kelvin < 400.01) {
         return vec3(0.0);
@@ -242,9 +256,7 @@ vec4 calculate_disk_color(
     float inter_radius,
     float outer_radius,
     float thin,
-    float disk_temperature_argument_local,
-    float peak_temp_pow4_local,
-    float shift_max_local
+    float disk_temperature_argument_local
 ) {
     vec3 camera_pos = WorldToBlackHoleSpace(camera_world_pos, black_hole_pos, disk_normal, world_up);
     vec3 pos_on_disk = WorldToBlackHoleSpace(ray_pos, black_hole_pos, disk_normal, world_up);
@@ -313,8 +325,8 @@ vec4 calculate_disk_color(
             float grav_shift = sqrt(max(1.0 - rs / max(pos_r, 1e-6), 0.000001)) /
                                sqrt(max(1.0 - rs / max(length(camera_pos), 1e-6), 0.000001));
             float red_shift = dopler * grav_shift;
-            float beaming = pow(max(dopler, 1e-4), 3.0 + beaming_spectral_index);
-            beaming = mix(1.0, min(beaming, beaming_clamp), clamp(beaming_strength, 0.0, 1.0));
+            float beaming = pow(max(dopler, 1e-4), 3.0 + BEAMING_SPECTRAL_INDEX);
+            beaming = mix(1.0, min(beaming, BEAMING_CLAMP), clamp(BEAMING_STRENGTH, 0.0, 1.0));
 
             float density = Shape(effective_radius, 4.0, 0.9);
             float thick = 0.0;
@@ -373,31 +385,30 @@ vec4 calculate_disk_color(
             color = color0;
             color *= 1.0 + 20.0 * exp(-10.0 * (pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6));
 
-            float bright_without_redshift = 4.5 * disk_temperature * disk_temperature * disk_temperature * disk_temperature / max(peak_temp_pow4_local, 1e-6);
+            float bright_without_redshift = 4.5 * disk_temperature * disk_temperature * disk_temperature * disk_temperature / max(PEAK_TEMPERATURE_POW4, 1e-6);
             if (disk_temperature > 1000.0) {
                 // Standard shift for blackbody temperature uses frequency shift once.
                 disk_temperature = max(1000.0, disk_temperature * red_shift);
             }
 
             disk_temperature = min(100000.0, disk_temperature);
-            bright_without_redshift = max(bright_without_redshift, disk_brightness_floor);
+            bright_without_redshift = max(bright_without_redshift, DISK_BRIGHTNESS_FLOOR);
 
             float thermal_kelvin = disk_temperature / exp((pos_r - inter_radius) / (0.6 * max(outer_radius - inter_radius, 1e-6)));
             thermal_kelvin *= disk_temperature_scale;
-            thermal_kelvin = clamp(thermal_kelvin, disk_temp_kelvin_min, disk_temp_kelvin_max);
-            vec3 thermal_rgb = KelvinToRgb(thermal_kelvin);
-            thermal_rgb = mix(thermal_rgb, vec3(1.0, 0.97, 0.92), clamp(disk_white_mix, 0.0, 1.0));
+            thermal_kelvin = clamp(thermal_kelvin, DISK_TEMP_KELVIN_MIN, DISK_TEMP_KELVIN_MAX);
+            vec3 thermal_rgb = DiskTemperatureToRgb(thermal_kelvin);
 
             color.xyz *= bright_without_redshift * min(1.0, 1.8 * (outer_radius - pos_r) / max(outer_radius - inter_radius, 1e-6)) * thermal_rgb;
-            color.xyz *= min(shift_max_local, red_shift);
+            color.xyz *= min(SHIFT_MAX, red_shift);
             color.xyz *= beaming;
 
-            red_shift = min(red_shift, shift_max_local);
+            red_shift = min(red_shift, SHIFT_MAX);
             color.xyz *= pow(abs(1.0 - (1.0 - min(1.0, red_shift)) * (pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6)), 9.0);
             color.xyz *= min(1.0, 1.0 + 0.5 * ((pos_r - inter_radius) / max(inter_radius, 1e-6) + inter_radius / max(pos_r - inter_radius, 1e-6)) - max(1.0, red_shift));
 
             color *= step_length / max(rs, 1e-6);
-            color.rgb = max(color.rgb, vec3(disk_rgb_floor) * color.a * thermal_rgb);
+            color.rgb = max(color.rgb, vec3(DISK_RGB_FLOOR) * color.a * thermal_rgb);
         }
     }
 	
@@ -474,9 +485,7 @@ void fragment() {
             inter_radius,
             outer_radius,
             thin,
-            disk_temperature_argument,
-            peak_temperature_pow4,
-            shift_max
+            disk_temperature_argument
         );
 
         if (disk_col_accum.a >= 0.99) {
