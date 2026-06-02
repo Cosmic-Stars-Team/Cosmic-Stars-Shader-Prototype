@@ -9,7 +9,7 @@ uniform float disk_tilt = -0.3;
 uniform float disk_inner_radius_ratio = 2.5;
 uniform float disk_outer_radius_ratio = 7.6;
 uniform float disk_thickness_ratio = 0.62;
-uniform float disk_noise_amount = 1.0;
+uniform float disk_noise_amount = 1.1;
 uniform float disk_temperature_scale = 0.71;
 uniform float output_exposure = 0.9;
 
