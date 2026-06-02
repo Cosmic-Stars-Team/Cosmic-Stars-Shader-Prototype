@@ -39,27 +39,14 @@ const float BLOOM_EMISSION = 2.5;
 const float USE_REINHARD_TONEMAP = 0.0;
 const float EMISSION_SOFT_CLIP = 1.0;
 const float FAR_FIELD_BOUNDARY_RS = 15.0;
-const float FAR_FIELD_BLEND_WIDTH_RS = 1.0;
 const float BLACKBODY_LUT_MAX_TEMPERATURE_K = 40000.0;
-const bool USE_BLACKBODY_LUT = true;
 const bool USE_FAR_FIELD_LUT = true;
-const bool USE_FAST_NOISE = true;
-
-const float shift_max = SHIFT_MAX;
-const float disk_visual_rotate_speed = DISK_VISUAL_ROTATE_SPEED;
-const float disk_outer_spin_ratio = DISK_OUTER_SPIN_RATIO;
-const float disk_visual_time_scale = DISK_VISUAL_TIME_SCALE;
-const float disk_temperature_argument = DISK_TEMPERATURE_ARGUMENT;
-const float peak_temperature_pow4 = PEAK_TEMPERATURE_POW4;
 
 const int MAX_STEPS = 512;
 
 const float kPi = 3.141592653589;
-const float kGravityConstant = 6.673e-11;
 const float kSpeedOfLight = 299792458.0;
-const float kSigma = 5.670373e-8;
 const float kLightYear = 9460730472580800.0;
-const float kSolarMass = 1.9884e30;
 
 void vertex() {
     POSITION = vec4(VERTEX.xy, 1.0, 1.0);
@@ -231,26 +218,6 @@ bool TryApplyFarFieldBoundary(inout vec3 ray_pos, inout vec3 ray_dir, float rs) 
     return true;
 }
 
-vec3 KelvinToRgb(float kelvin) {
-    if (kelvin < 400.01) {
-        return vec3(0.0);
-    }
-
-    float teff = (kelvin - 6500.0) / (6500.0 * kelvin * 2.2);
-    vec3 rgb_color = vec3(0.0);
-
-    rgb_color.r = exp(2.05539304e4 * teff);
-    rgb_color.g = exp(2.63463675e4 * teff);
-    rgb_color.b = exp(3.30145739e4 * teff);
-
-    float brightness_scale = 1.0 / max(max(rgb_color.r, rgb_color.g), rgb_color.b);
-    if (kelvin < 1000.0) {
-        brightness_scale *= (kelvin - 400.0) / 600.0;
-    }
-
-    return rgb_color * brightness_scale;
-}
-
 float GetKeplerianAngularVelocity(float radius, float rs) {
     return sqrt(kSpeedOfLight / kLightYear * kSpeedOfLight * rs / kLightYear / ((2.0 * radius - 3.0 * rs) * radius * radius));
 }
@@ -380,8 +347,8 @@ vec4 calculate_disk_color(
 
             // Make outer disk visibly rotate as well; keep inner ring faster.
             float radius_ratio = clamp(inter_radius / max(pos_r, 1e-6), 0.0, 1.0);
-            float radius_spin_mix = mix(disk_outer_spin_ratio, 1.0, radius_ratio);
-            float visual_phase = animated_time * disk_visual_rotate_speed * disk_visual_time_scale * radius_spin_mix;
+            float radius_spin_mix = mix(DISK_OUTER_SPIN_RATIO, 1.0, radius_ratio);
+            float visual_phase = animated_time * DISK_VISUAL_ROTATE_SPEED * DISK_VISUAL_TIME_SCALE * radius_spin_mix;
 
             float radius_rs = pos_r / max(rs, 1e-6);
             float y_norm = pos_y / max(thin, 1e-6);
