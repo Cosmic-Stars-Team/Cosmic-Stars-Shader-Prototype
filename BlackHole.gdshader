@@ -15,7 +15,7 @@ uniform float output_exposure = 0.9;
 
 uniform sampler2D sky_texture : filter_nearest;
 uniform sampler2D blackbody_lut : filter_linear, repeat_disable;
-uniform sampler2D far_field_deflection_lut : filter_linear;
+uniform sampler2D far_field_deflection_lut : filter_linear, repeat_disable;
 
 const float BASE_STEP = 0.02;
 const float TIME_RATE = 8.0;
@@ -462,7 +462,9 @@ void fragment() {
     vec3 x = camera_world_pos;
     vec3 v = rd;
 
-    TryApplyFarFieldBoundary(x, v, Rs);
+    if (disk_outer_radius_ratio <= FAR_FIELD_BOUNDARY_RS) {
+        TryApplyFarFieldBoundary(x, v, Rs);
+    }
 
     vec3 L_vec = cross(x, v);
     float L2 = dot(L_vec, L_vec);
