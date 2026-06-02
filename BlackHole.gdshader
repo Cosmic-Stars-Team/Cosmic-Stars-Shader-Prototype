@@ -14,7 +14,7 @@ uniform float disk_temperature_scale = 0.71;
 uniform float output_exposure = 0.9;
 
 uniform sampler2D sky_texture : filter_nearest;
-uniform sampler2D blackbody_lut : filter_linear;
+uniform sampler2D blackbody_lut : filter_linear, repeat_disable;
 uniform sampler2D far_field_deflection_lut : filter_linear;
 
 const float BASE_STEP = 0.02;
