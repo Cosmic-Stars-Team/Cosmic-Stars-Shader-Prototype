@@ -334,10 +334,18 @@ vec4 calculate_disk_color(
                 disk_plane_jitter_dir = vec3(1.0, 0.0, 0.0);
             }
             disk_plane_jitter_dir = normalize(disk_plane_jitter_dir);
-            float plane_jitter_mix = smoothstep(0.35, 0.95, abs(dir_on_disk.y));
+            float disk_normal_view = abs(dir_on_disk.y);
+            float plane_jitter_mix = smoothstep(0.35, 0.95, disk_normal_view);
             vec3 jitter_dir = normalize(mix(dir_on_disk, disk_plane_jitter_dir, plane_jitter_mix));
-            pos_on_disk = c_point + min(thin, length(c_point - last_pos_on_disk)) * jitter_dir *
-                (-1.0 + 2.0 * RandomStep(10000000000.0 * pos_on_disk.zx, fract(animated_time + 0.5)));
+            vec2 jitter_uv = c_point.zx / max(rs, 1e-6);
+            float jitter_noise = PerlinNoise(vec3(
+                jitter_uv.x * 2.1 + animated_time * 0.006,
+                jitter_uv.y * 2.1 - animated_time * 0.004,
+                animated_time * 0.013
+            ));
+            float jitter_scale = mix(0.70, 0.28, plane_jitter_mix);
+            pos_on_disk = c_point + min(thin, length(c_point - last_pos_on_disk)) *
+                jitter_dir * jitter_noise * jitter_scale;
 
             step_length = length(pos_on_disk - last_pos_on_disk);
             pos_r = length(pos_on_disk.zx);
@@ -513,8 +521,9 @@ vec4 calculate_disk_color(
             float surface_path_weight = crossed_midplane * 0.12 * smoothstep(0.35, 1.0, abs(dir_on_disk.y));
             color *= max(step_length / max(rs, 1e-6), surface_path_weight);
             float local_luma = Luminance(color.rgb);
-            float strand_mask = smoothstep(0.0015, 0.080, local_luma);
-            float filament_core = smoothstep(0.055, 0.220, local_luma);
+            float strand_mask = smoothstep(0.003, 0.095, local_luma);
+            float opacity_core_gate = smoothstep(0.08, 0.34, color.a);
+            float filament_core = smoothstep(0.070, 0.260, local_luma) * opacity_core_gate;
             float highlight_luma = local_luma / (1.0 + local_luma * 0.85);
             float cold_side = 1.0 - hot_side;
             float volume_shadow = smoothstep(0.16, 0.72, color.a) * (1.0 - 0.55 * filament_core) * (0.28 + 0.72 * cold_side);
