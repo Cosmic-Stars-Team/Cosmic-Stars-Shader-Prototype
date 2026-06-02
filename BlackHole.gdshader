@@ -177,7 +177,7 @@ vec3 SampleBlackbodyColor(float temperature_k) {
 }
 
 vec3 DiskTemperatureToRgb(float temperature_k) {
-    vec3 thermal_rgb = USE_BLACKBODY_LUT ? SampleBlackbodyColor(temperature_k) : KelvinToRgb(temperature_k);
+    vec3 thermal_rgb = SampleBlackbodyColor(temperature_k);
     return mix(thermal_rgb, vec3(1.0, 0.97, 0.92), DISK_WHITE_MIX);
 }
 
