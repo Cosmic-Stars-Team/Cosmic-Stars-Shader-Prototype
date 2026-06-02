@@ -45,19 +45,12 @@ const bool USE_BLACKBODY_LUT = true;
 const bool USE_FAR_FIELD_LUT = true;
 const bool USE_FAST_NOISE = true;
 
-const float base_step = BASE_STEP;
-const float time_rate = TIME_RATE;
-const float time_override = TIME_OVERRIDE;
 const float shift_max = SHIFT_MAX;
 const float disk_visual_rotate_speed = DISK_VISUAL_ROTATE_SPEED;
 const float disk_outer_spin_ratio = DISK_OUTER_SPIN_RATIO;
 const float disk_visual_time_scale = DISK_VISUAL_TIME_SCALE;
 const float disk_temperature_argument = DISK_TEMPERATURE_ARGUMENT;
 const float peak_temperature_pow4 = PEAK_TEMPERATURE_POW4;
-const float bloom_threshold = BLOOM_THRESHOLD;
-const float bloom_emission = BLOOM_EMISSION;
-const float use_reinhard_tonemap = USE_REINHARD_TONEMAP;
-const float emission_soft_clip = EMISSION_SOFT_CLIP;
 
 const int MAX_STEPS = 512;
 
@@ -176,6 +169,68 @@ vec3 DiskTemperatureToRgb(float temperature_k) {
     return mix(thermal_rgb, vec3(1.0, 0.97, 0.92), DISK_WHITE_MIX);
 }
 
+float FarFieldImpactUv(float impact_parameter, float rs) {
+    float b_crit = 1.5 * sqrt(3.0) * rs;
+    float b_min = b_crit + 1e-6 * rs;
+    float b_max = FAR_FIELD_BOUNDARY_RS * rs;
+    return (impact_parameter - b_min) / max(b_max - b_min, 1e-6);
+}
+
+bool TryApplyFarFieldBoundary(inout vec3 ray_pos, inout vec3 ray_dir, float rs) {
+    if (!USE_FAR_FIELD_LUT || rs <= 0.0 || abs(gravity_strength - 1.0) > 0.05) {
+        return false;
+    }
+
+    float boundary_radius = FAR_FIELD_BOUNDARY_RS * rs;
+    float r = length(ray_pos);
+    if (r <= boundary_radius) {
+        return false;
+    }
+
+    vec3 er0 = ray_pos / max(r, 1e-6);
+    float vr0 = dot(ray_dir, er0);
+    if (vr0 >= 0.0) {
+        return false;
+    }
+
+    vec3 vt_vec = ray_dir - er0 * vr0;
+    float vt0 = length(vt_vec);
+    if (vt0 <= 1e-6) {
+        return false;
+    }
+
+    vec3 et0 = vt_vec / vt0;
+    float b = r * vt0;
+    float b_crit = 1.5 * sqrt(3.0) * rs;
+    float b_min = b_crit + 1e-6 * rs;
+    float b_max = boundary_radius;
+    if (b < b_min || b > b_max) {
+        return false;
+    }
+
+    float u = 1.0 / r;
+    vec2 lut_uv = vec2(FarFieldImpactUv(b, rs), u * boundary_radius);
+    float deflection = texture(far_field_deflection_lut, lut_uv).r;
+
+    float boundary_u = 1.0 / boundary_radius;
+    float vt_boundary = b * boundary_u;
+    float vr_boundary_sq = max(1.0 - b * b * boundary_u * boundary_u + rs * b * b * boundary_u * boundary_u * boundary_u, 0.0);
+    float vr_boundary = -sqrt(vr_boundary_sq);
+
+    float alpha0 = atan(vt0, vr0);
+    float alpha_boundary = atan(vt_boundary, vr_boundary);
+    float radial_delta = deflection + alpha0 - alpha_boundary;
+
+    float c = cos(radial_delta);
+    float s = sin(radial_delta);
+    vec3 er_boundary = normalize(er0 * c + et0 * s);
+    vec3 et_boundary = normalize(-er0 * s + et0 * c);
+
+    ray_pos = er_boundary * boundary_radius;
+    ray_dir = normalize(er_boundary * vr_boundary + et_boundary * vt_boundary);
+    return true;
+}
+
 vec3 KelvinToRgb(float kelvin) {
     if (kelvin < 400.01) {
         return vec3(0.0);
@@ -243,15 +298,13 @@ vec4 calculate_disk_color(
     vec3 ray_pos,
     vec3 last_ray_pos,
     vec3 ray_dir,
-    vec3 last_ray_dir,
     vec3 world_up,
     vec3 black_hole_pos,
     vec3 disk_normal,
     float rs,
     float inter_radius,
     float outer_radius,
-    float thin,
-    float disk_temperature_argument_local
+    float thin
 ) {
     vec3 camera_pos = WorldToBlackHoleSpace(camera_world_pos, black_hole_pos, disk_normal, world_up);
     vec3 pos_on_disk = WorldToBlackHoleSpace(ray_pos, black_hole_pos, disk_normal, world_up);
@@ -304,7 +357,7 @@ vec4 calculate_disk_color(
             float pos_theta = Vec2ToTheta(pos_on_disk.zx, vec2(cos(-spiral_theta), sin(-spiral_theta)));
 
             float disk_temperature = pow(
-                disk_temperature_argument_local * pow(max(rs / max(pos_r, 1e-6), 0.10), 3.0) * max(1.0 - sqrt(inter_radius / max(pos_r, 1e-6)), 0.000001),
+                DISK_TEMPERATURE_ARGUMENT * pow(max(rs / max(pos_r, 1e-6), 0.10), 3.0) * max(1.0 - sqrt(inter_radius / max(pos_r, 1e-6)), 0.000001),
                 0.25
             );
 
@@ -409,17 +462,19 @@ void fragment() {
     vec3 x = camera_world_pos;
     vec3 v = rd;
 
+    TryApplyFarFieldBoundary(x, v, Rs);
+
     vec3 L_vec = cross(x, v);
     float L2 = dot(L_vec, L_vec);
 
     bool hit_hole = false;
     float real_escape_radius = 500.0;
 
-    float anim_time = (time_override >= 0.0) ? time_override : (TIME * time_rate);
+    float anim_time = (TIME_OVERRIDE >= 0.0) ? TIME_OVERRIDE : (TIME * TIME_RATE);
     vec4 disk_col_accum = vec4(0.0);
     float dither = RandomStep(SCREEN_UV, fract(anim_time));
 
-    float initial_dl = base_step * (max(length(x), Rs * 0.5) + 0.01 * length(x) * length(x));
+    float initial_dl = BASE_STEP * (max(length(x), Rs * 0.5) + 0.01 * length(x) * length(x));
     rk4_step(x, v, initial_dl * dither, L2);
 
     float inter_radius = disk_inner_radius_ratio * Rs;
@@ -427,7 +482,6 @@ void fragment() {
     float thin = disk_thickness_ratio * Rs;
 
     vec3 last_ray_pos = x;
-    vec3 last_ray_dir = v;
     float step_length = 0.0;
 
     vec3 disk_normal = normalize(vec3(disk_tilt, 1.0, 0.0));
@@ -447,7 +501,7 @@ void fragment() {
             break;
         }
 
-        float dl = base_step * (max(r, Rs * 0.5) + 0.01 * r * r);
+        float dl = BASE_STEP * (max(r, Rs * 0.5) + 0.01 * r * r);
 
         disk_col_accum = calculate_disk_color(
             disk_col_accum,
@@ -457,15 +511,13 @@ void fragment() {
             x,
             last_ray_pos,
             v,
-            last_ray_dir,
             world_up,
             vec3(0.0),
             disk_normal,
             Rs,
             inter_radius,
             outer_radius,
-            thin,
-            disk_temperature_argument
+            thin
         );
 
         if (disk_col_accum.a >= 0.99) {
@@ -473,7 +525,6 @@ void fragment() {
         }
 
         last_ray_pos = x;
-        last_ray_dir = v;
 
         rk4_step(x, v, dl, L2);
         step_length = dl;
@@ -506,16 +557,16 @@ void fragment() {
 	composite = clamp(composite, vec3(0.0), vec3(128.0));
 	
     vec3 display_col = composite;
-    if (use_reinhard_tonemap > 0.5) {
+    if (USE_REINHARD_TONEMAP > 0.5) {
         display_col = composite / (vec3(1.0) + composite);
     }
 	
     ALBEDO = clamp(display_col, vec3(0.0), vec3(1.0));
 
     // Bloom source from display-space color to avoid HDR blow-up.
-    vec3 bloom_src = max(display_col - vec3(bloom_threshold), vec3(0.0));
-    if (emission_soft_clip > 0.0) {
-        bloom_src = bloom_src / (vec3(emission_soft_clip) + bloom_src);
+    vec3 bloom_src = max(display_col - vec3(BLOOM_THRESHOLD), vec3(0.0));
+    if (EMISSION_SOFT_CLIP > 0.0) {
+        bloom_src = bloom_src / (vec3(EMISSION_SOFT_CLIP) + bloom_src);
     }
-EMISSION = clamp(bloom_src * bloom_emission, vec3(0.0), vec3(128.0));
+EMISSION = clamp(bloom_src * BLOOM_EMISSION, vec3(0.0), vec3(128.0));
 }
