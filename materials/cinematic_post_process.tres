@@ -1,0 +1,6 @@
+[gd_resource type="ShaderMaterial" format=3]
+
+[ext_resource type="Shader" path="res://CinematicPostProcess.gdshader" id="1_post"]
+
+[resource]
+shader = ExtResource("1_post")

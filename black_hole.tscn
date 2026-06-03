@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://u8inby805ucp" path="res://camera_3d.gd" id="1_5vpqt"]
 [ext_resource type="Material" uid="uid://qxooc2475gd5" path="res://materials/blackhole_live.tres" id="3_m0g2x"]
+[ext_resource type="Material" path="res://materials/cinematic_post_process.tres" id="4_post"]
 
 [sub_resource type="QuadMesh" id="QuadMesh_yefb3"]
 material = ExtResource("3_m0g2x")
@@ -15,19 +16,19 @@ reflected_light_source = 1
 tonemap_mode = 3
 tonemap_exposure = 1.32
 glow_enabled = true
-glow_levels/1 = 0.68
-glow_levels/2 = 0.43
-glow_levels/3 = 0.35
-glow_levels/4 = 0.2
-glow_levels/5 = 0.07
-glow_levels/6 = 0.028
-glow_levels/7 = 0.012
-glow_intensity = 1.45
-glow_strength = 1.08
-glow_bloom = 1.0
+glow_levels/1 = 0.62
+glow_levels/2 = 0.38
+glow_levels/3 = 0.28
+glow_levels/4 = 0.16
+glow_levels/5 = 0.052
+glow_levels/6 = 0.02
+glow_levels/7 = 0.008
+glow_intensity = 1.22
+glow_strength = 0.92
+glow_bloom = 0.82
 glow_blend_mode = 0
-glow_hdr_threshold = 1.32
-glow_hdr_scale = 1.15
+glow_hdr_threshold = 1.42
+glow_hdr_scale = 1.05
 glow_hdr_luminance_cap = 200.0
 glow_map_strength = 0.32
 adjustment_enabled = true
@@ -48,3 +49,15 @@ surface_material_override/0 = ExtResource("3_m0g2x")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1501309250]
 environment = SubResource("Environment_5vpqt")
+
+[node name="CinematicPostProcess" type="CanvasLayer" parent="."]
+layer = 128
+
+[node name="ScreenGrade" type="ColorRect" parent="CinematicPostProcess"]
+material = ExtResource("4_post")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
