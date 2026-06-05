@@ -46,6 +46,9 @@ const float DISK_HAZE_CONTRAST = 0.66;
 const float DISK_OPACITY_GAIN = 0.88;
 const float DISK_CORE_OPACITY_GAIN = 1.28;
 const float DISK_GLOBAL_BRIGHTNESS = 1.62;
+// A: scales the hand-tuned artistic emission additions. 1.0 = current Godot look;
+// lower toward 0.0 to let the example's physical T^4 * KelvinToRgb core dominate.
+const float DISK_ARTISTIC_EMISSION = 0.35;
 const float DISK_BLUE_SIDE_BOOST = 2.10;
 const float DISK_RED_SIDE_FILL = 1.55;
 const float DISK_RADIAL_LAYER_STRENGTH = 0.52;
@@ -272,6 +275,23 @@ vec3 HdrBloomSource(vec3 hdr_color) {
     float luma = Luminance(safe_color);
     float response = smoothstep(BLOOM_THRESHOLD, BLOOM_THRESHOLD + HDR_BLOOM_KNEE, luma);
     return safe_color * response * HDR_EMISSION_GAIN;
+}
+
+// Faithful port of the reference Shadertoy bloom "inverse tonemap":
+// it expands a near-LDR color back into HDR so bright pixels explode
+// (0.5 -> ~1.0, 0.9 -> ~6.3, 0.99 -> clamped to BLOOM_EXPAND_MAX), while a
+// per-channel hue factor keeps the original color ratio. The expanded value
+// drives EMISSION so Godot's glow blurs it into the signature bleed.
+const float BLOOM_EXPAND_MAX = 12.0;
+vec3 BloomExpand(vec3 c) {
+    c = clamp(c, vec3(0.0), vec3(0.999));
+    float denom = max(c.g + c.g + c.b, 1e-4);
+    vec3 hue_factor = 3.0 * c / denom;
+    vec3 e;
+    e.r = min(-4.0 * log(1.0 - pow(c.r, 2.2)), BLOOM_EXPAND_MAX * hue_factor.r);
+    e.g = min(-4.0 * log(1.0 - pow(c.g, 2.2)), BLOOM_EXPAND_MAX * hue_factor.g);
+    e.b = min(-4.0 * log(1.0 - pow(c.b, 2.2)), BLOOM_EXPAND_MAX * hue_factor.b);
+    return max(e, vec3(0.0));
 }
 
 float FarFieldImpactUv(float impact_parameter, float rs) {
@@ -730,27 +750,29 @@ vec4 calculate_disk_color(
             color.rgb *= 1.0 + 0.48 * key_light;
             color.rgb *= mix(vec3(1.0), DISK_BACK_LIGHT_TINT, clamp(back_shadow * 0.42, 0.0, 0.68));
             float emission_luma = max(highlight_luma, color.a * (0.010 + 0.018 * disk_layers));
-            color.rgb += key_tint * emission_luma * key_light * 0.62;
-            color.rgb += filament_tint * emission_luma * anisotropic_filament * 0.66;
-            color.rgb += mix(DISK_RING_HALO_TINT, DISK_COLD_EDGE_TINT, hot_side) *
+            vec3 artistic_emission = vec3(0.0);
+            artistic_emission += key_tint * emission_luma * key_light * 0.62;
+            artistic_emission += filament_tint * emission_luma * anisotropic_filament * 0.66;
+            artistic_emission += mix(DISK_RING_HALO_TINT, DISK_COLD_EDGE_TINT, hot_side) *
                 emission_luma * disk_layers * layer_visibility * (0.24 + 0.18 * lensed_arc);
-            color.rgb += DISK_RING_HALO_TINT * emission_luma * ring_halo_light * 0.32;
-            color.rgb += DISK_RING_CORE_TINT * emission_luma * ring_core_light * 0.46;
-            color.rgb += DISK_COLD_EDGE_TINT * emission_luma * cold_edge * 0.30;
+            artistic_emission += DISK_RING_HALO_TINT * emission_luma * ring_halo_light * 0.32;
+            artistic_emission += DISK_RING_CORE_TINT * emission_luma * ring_core_light * 0.46;
+            artistic_emission += DISK_COLD_EDGE_TINT * emission_luma * cold_edge * 0.30;
             float hot_white_core = hot_side * smoothstep(0.10, 0.68, color.a) *
                 (0.42 + 0.58 * inner_key) * (0.38 + 0.62 * strand_mask);
-            color.rgb += DISK_WHITE_TINT * emission_luma * hot_white_core * 0.92;
-            color.rgb += DISK_BLUE_RIM_EMISSION * emission_luma * hot_white_core * 0.22;
+            artistic_emission += DISK_WHITE_TINT * emission_luma * hot_white_core * 0.92;
+            artistic_emission += DISK_BLUE_RIM_EMISSION * emission_luma * hot_white_core * 0.22;
             float blue_side = rim_light * hot_side * (0.35 + 0.65 * strand_mask) * (0.45 + 0.55 * grazing_view);
-            color.rgb += DISK_BLUE_RIM_EMISSION * emission_luma * blue_side * DISK_BLUE_SIDE_BOOST;
+            artistic_emission += DISK_BLUE_RIM_EMISSION * emission_luma * blue_side * DISK_BLUE_SIDE_BOOST;
             float red_side = cold_side * smoothstep(0.08, 0.70, color.a) *
                 (0.28 + 0.72 * radial01) * strand_mask *
                 clamp(0.92 * ring_halo + 0.30 * inner_key, 0.0, 1.0);
             float red_body_light = cold_side * smoothstep(0.06, 0.62, color.a) *
                 (0.28 + 0.72 * radial01) * (0.32 + 0.68 * grazing_view) *
                 (0.30 + 0.70 * disk_layers);
-            color.rgb += DISK_RED_FILL_EMISSION * emission_luma * red_body_light * 0.32;
-            color.rgb += DISK_RED_FILL_EMISSION * emission_luma * red_side * DISK_RED_SIDE_FILL;
+            artistic_emission += DISK_RED_FILL_EMISSION * emission_luma * red_body_light * 0.32;
+            artistic_emission += DISK_RED_FILL_EMISSION * emission_luma * red_side * DISK_RED_SIDE_FILL;
+            color.rgb += artistic_emission * DISK_ARTISTIC_EMISSION;
             color.rgb *= DISK_GLOBAL_BRIGHTNESS;
             float lit_optical_depth = optical_depth * (1.0 + 0.10 * key_light + 0.18 * back_shadow);
             color.a = clamp(1.0 - exp(-lit_optical_depth), 0.0, 1.0);
@@ -912,10 +934,9 @@ void fragment() {
 	
     ALBEDO = clamp(FilmicDisplay(display_col), vec3(0.0), vec3(1.0));
 
-    // Use the HDR composite for selective glow; ALBEDO stays filmic to avoid flat white clipping.
-    vec3 bloom_src = HdrBloomSource(composite);
-    if (EMISSION_SOFT_CLIP > 0.0) {
-        bloom_src = bloom_src / (vec3(EMISSION_SOFT_CLIP) + bloom_src * 0.35);
-    }
-    EMISSION = clamp(bloom_src * BLOOM_EMISSION, vec3(0.0), vec3(128.0));
+    // A: reference-style bloom. Expand the displayed LDR image back into HDR with
+    // the inverse-tonemap so bright disk/photon-ring pixels bleed strongly through
+    // Godot's glow, instead of the gentle thresholded EMISSION used before.
+    vec3 bloom_src = BloomExpand(ALBEDO);
+    EMISSION = clamp(bloom_src, vec3(0.0), vec3(128.0));
 }
