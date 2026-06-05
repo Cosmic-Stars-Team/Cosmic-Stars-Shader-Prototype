@@ -16,6 +16,12 @@ uniform float output_exposure = 0.9;
 uniform sampler2D sky_texture : filter_nearest;
 uniform sampler2D blackbody_lut : filter_linear, repeat_disable;
 uniform sampler2D far_field_deflection_lut : filter_linear, repeat_disable;
+// (b) Quick perf-validation: a tiling 3D noise texture (NoiseTexture3D / FastNoiseLite).
+// PerlinNoise() samples this instead of computing the 8-corner hash, to measure how
+// much the texture fetch saves. Visual will differ from the procedural noise until we
+// bake a pixel-identical version.
+uniform sampler3D noise_texture : filter_linear, repeat_enable;
+uniform float noise_texture_scale = 0.15;
 
 const float BASE_STEP = 0.02;
 const float TIME_RATE = 8.0;
@@ -118,6 +124,18 @@ void rk4_step(inout vec3 x, inout vec3 v, float dl, float L2) {
     v += (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v) * (dl / 6.0);
 }
 
+// Velocity Verlet: 2nd-order accurate but only ONE acceleration eval per step
+// (the previous step's acceleration is cached in `accel`), vs RK4's four.
+// Ideal here because the force depends only on position, and it stays stable
+// for the tightly-winding photon-ring rays. `accel` MUST be seeded with
+// calc_acceleration(x, L2) once before the first call.
+void verlet_step(inout vec3 x, inout vec3 v, inout vec3 accel, float dl, float L2) {
+    x += v * dl + (0.5 * dl * dl) * accel;
+    vec3 accel_new = calc_acceleration(x, L2);
+    v += (0.5 * dl) * (accel + accel_new);
+    accel = accel_new;
+}
+
 float RandomStep(vec2 input_uv, float seed) {
     vec3 p = fract(vec3(input_uv, seed) * vec3(0.1031, 0.0973, 0.1099));
     p += dot(p, p.yzx + 33.33);
@@ -142,6 +160,13 @@ void HashCorners3D(vec3 cell, out vec4 z0, out vec4 z1) {
 }
 
 float PerlinNoise(vec3 position) {
+    // (b) Texture-fetch path: hardware trilinear filtering + tiling replaces the
+    // 8-corner hash. repeat_enable lets any position wrap into the texture.
+    // *2-1 remaps the texture's [0,1] back to the procedural noise's ~[-1,1].
+    return texture(noise_texture, position * noise_texture_scale).r * 2.0 - 1.0;
+}
+
+float PerlinNoiseProcedural(vec3 position) {
     vec3 pos_int = floor(position);
     vec3 pos_float = fract(position);
 
@@ -616,7 +641,7 @@ vec4 calculate_disk_color(
                     strand_theta,
                     3.0,
                     2,
-                    5,
+                    4,
                     46.0
                 ));
                 micro_strand *= strand_gate * (0.35 + 0.65 * vertical_core) * (1.0 + 0.45 * lensed_arc);
@@ -647,7 +672,7 @@ vec4 calculate_disk_color(
                     pos_theta_for_inner_cloud,
                     1.5,
                     0,
-                    6,
+                    4,
                     DISK_NOISE_CONTRAST
                 );
                 dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) * dust_noise;
@@ -824,7 +849,9 @@ void fragment() {
     float dither = mix(0.18, 0.82, RandomStep(pixel_coord, 0.371));
 
     float initial_dl = BASE_STEP * (max(length(x), Rs * 0.5) + 0.01 * length(x) * length(x));
-    rk4_step(x, v, initial_dl * dither, L2);
+    // Re-test Velocity Verlet now that texturing freed up the hash registers.
+    vec3 accel = calc_acceleration(x, L2);
+    verlet_step(x, v, accel, initial_dl * dither, L2);
 
     float inter_radius = disk_inner_radius_ratio * Rs;
     float outer_radius = disk_outer_radius_ratio * Rs;
@@ -891,7 +918,7 @@ void fragment() {
 
         last_ray_pos = x;
 
-        rk4_step(x, v, dl, L2);
+        verlet_step(x, v, accel, dl, L2);
         step_length = dl;
     }
 

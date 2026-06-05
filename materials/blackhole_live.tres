@@ -5,6 +5,17 @@
 [ext_resource type="Texture2D" path="res://lud/blackbody_1d_lut_4k.exr" id="3_bbody"]
 [ext_resource type="Texture2D" path="res://lud/far_field_ray_deflection_lut_rs1_4096.exr" id="4_farfield"]
 
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_noise"]
+noise_type = 3
+frequency = 0.05
+
+[sub_resource type="NoiseTexture3D" id="NoiseTexture3D_noise"]
+seamless = true
+width = 64
+height = 64
+depth = 64
+noise = SubResource("FastNoiseLite_noise")
+
 [resource]
 render_priority = 0
 shader = ExtResource("1_sjfy6")
@@ -21,3 +32,5 @@ shader_parameter/output_exposure = 1.28
 shader_parameter/sky_texture = ExtResource("2_q56d7")
 shader_parameter/blackbody_lut = ExtResource("3_bbody")
 shader_parameter/far_field_deflection_lut = ExtResource("4_farfield")
+shader_parameter/noise_texture = SubResource("NoiseTexture3D_noise")
+shader_parameter/noise_texture_scale = 0.15
