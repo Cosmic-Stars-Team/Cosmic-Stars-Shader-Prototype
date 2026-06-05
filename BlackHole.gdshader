@@ -274,6 +274,23 @@ vec3 HdrBloomSource(vec3 hdr_color) {
     return safe_color * response * HDR_EMISSION_GAIN;
 }
 
+// B: faithful port of the reference Shadertoy bloom "inverse tonemap" only.
+// Expands a near-LDR color back into HDR so bright pixels explode
+// (0.5 -> ~1.0, 0.9 -> ~6.3, 0.99 -> clamped to BLOOM_EXPAND_MAX); a per-channel
+// hue factor keeps the original color ratio. Drives EMISSION for the glow bleed.
+// The disk shading is left exactly as in the current Godot version.
+const float BLOOM_EXPAND_MAX = 12.0;
+vec3 BloomExpand(vec3 c) {
+    c = clamp(c, vec3(0.0), vec3(0.999));
+    float denom = max(c.g + c.g + c.b, 1e-4);
+    vec3 hue_factor = 3.0 * c / denom;
+    vec3 e;
+    e.r = min(-4.0 * log(1.0 - pow(c.r, 2.2)), BLOOM_EXPAND_MAX * hue_factor.r);
+    e.g = min(-4.0 * log(1.0 - pow(c.g, 2.2)), BLOOM_EXPAND_MAX * hue_factor.g);
+    e.b = min(-4.0 * log(1.0 - pow(c.b, 2.2)), BLOOM_EXPAND_MAX * hue_factor.b);
+    return max(e, vec3(0.0));
+}
+
 float FarFieldImpactUv(float impact_parameter, float rs) {
     float b_crit = 1.5 * sqrt(3.0) * rs;
     float b_min = b_crit + 1e-6 * rs;
@@ -912,10 +929,8 @@ void fragment() {
 	
     ALBEDO = clamp(FilmicDisplay(display_col), vec3(0.0), vec3(1.0));
 
-    // Use the HDR composite for selective glow; ALBEDO stays filmic to avoid flat white clipping.
-    vec3 bloom_src = HdrBloomSource(composite);
-    if (EMISSION_SOFT_CLIP > 0.0) {
-        bloom_src = bloom_src / (vec3(EMISSION_SOFT_CLIP) + bloom_src * 0.35);
-    }
-    EMISSION = clamp(bloom_src * BLOOM_EMISSION, vec3(0.0), vec3(128.0));
+    // B: reference-style bloom only. Disk shading unchanged; just expand the
+    // displayed LDR image back into HDR so bright pixels bleed through glow.
+    vec3 bloom_src = BloomExpand(ALBEDO);
+    EMISSION = clamp(bloom_src, vec3(0.0), vec3(128.0));
 }
