@@ -186,10 +186,12 @@ float SoftSaturate(float x) {
 
 float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise_end_level, float contrast_level) {
     float noise_accumulator = 10.0;
+    // Running frequency multiply replaces a pow(3.0, level) per octave — this is
+    // the hottest loop in the shader, so dropping the per-octave exp/log matters.
+    float noise_frequency = pow(3.0, float(noise_start_level));
     for (int level = noise_start_level; level < noise_end_level; ++level) {
-        float noise_frequency = pow(3.0, float(level));
-        vec3 scaled_position = noise_frequency * position;
-        noise_accumulator *= (1.0 + 0.1 * PerlinNoise(scaled_position));
+        noise_accumulator *= (1.0 + 0.1 * PerlinNoise(noise_frequency * position));
+        noise_frequency *= 3.0;
     }
     return log(1.0 + pow(max(0.1 * noise_accumulator, 1e-6), contrast_level));
 }
