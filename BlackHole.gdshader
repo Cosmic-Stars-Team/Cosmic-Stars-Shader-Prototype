@@ -89,7 +89,7 @@ const float HDR_EMISSION_GAIN = 1.26;
 const float USE_REINHARD_TONEMAP = 0.0;
 const float EMISSION_SOFT_CLIP = 0.72;
 const float DISK_HAZE_CONTRAST = 0.66;
-const float DISK_OPACITY_GAIN = 0.88;
+const float DISK_OPACITY_GAIN = 1.10;
 const float DISK_CORE_OPACITY_GAIN = 1.28;
 const float DISK_GLOBAL_BRIGHTNESS = 1.62;
 // A: scales the hand-tuned artistic emission additions. 1.0 = current Godot look;
@@ -263,6 +263,12 @@ float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise
     // Per-octave domain rotation (decorrelates value-noise grid). Seed it so the
     // start octave isn't axis-aligned either.
     mat3 rot = mat3(1.0);
+    // Per-octave amplitude, tapered each octave so high-freq octaves don't read
+    // as uniform grain: coarse octaves dominate, the finest become a faint accent
+    // -> flowing strands instead of speckle. 0.1 keeps the coarse octave's
+    // original look; the 0.6 taper is the only "dust -> filament" knob (edit here).
+    float octave_amplitude = 0.1;
+    const float NOISE_PERSISTENCE = 0.6;
     for (int level = noise_start_level; level < noise_end_level; ++level) {
         vec3 sample_pos = rot * (noise_frequency * position);
 
@@ -279,8 +285,9 @@ float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise
         // resolve. footprint == 0 (High tier) is a no-op -> full detail.
         float octave_fade = clamp(1.0 - noise_detail_footprint * noise_frequency, 0.0, 1.0);
 
-        noise_accumulator *= (1.0 + 0.1 * octave_fade * octave_noise);
+        noise_accumulator *= (1.0 + octave_amplitude * octave_fade * octave_noise);
         noise_frequency *= 3.0;
+        octave_amplitude *= NOISE_PERSISTENCE;
         rot = OCTAVE_ROT * rot;
     }
     return log(1.0 + pow(max(0.1 * noise_accumulator, 1e-6), contrast_level));
@@ -914,7 +921,10 @@ vec4 calculate_disk_color(
             color.a = clamp(1.0 - exp(-lit_optical_depth), 0.0, 1.0);
             color.a = clamp(color.a + 0.020 * anisotropic_filament + 0.008 * ring_core + 0.004 * ring_halo, 0.0, 1.0);
             float alpha_luma_gate = smoothstep(0.002, 0.035, Luminance(color.rgb));
-            color.a *= mix(0.42, 1.0, alpha_luma_gate);
+            // Floor (was 0.42): dim outer/red gas still occludes the background so
+            // the disk reads as a body, not a translucent haze with stars showing
+            // through. Bright cores are unaffected (gate -> 1.0 there).
+            color.a *= mix(0.60, 1.0, alpha_luma_gate);
             color.rgb += DISK_RIM_TINT * max(highlight_luma, DISK_RGB_FLOOR * color.a) * rim_light * 0.58;
             float blue_rim = rim_light * hot_side * strand_mask;
             color.rgb += DISK_BLUE_RIM_EMISSION * max(highlight_luma, DISK_RGB_FLOOR * color.a) * blue_rim * 0.34;
