@@ -12,6 +12,10 @@ uniform float disk_thickness_ratio = 0.62;
 uniform float disk_noise_amount = 1.1;
 uniform float disk_temperature_scale = 0.71;
 uniform float output_exposure = 0.9;
+// Highlight white point for FilmicDisplay's extended-Reinhard shoulder: the HDR
+// luminance that maps to ~1.0. Higher = more highlight headroom (bright cores
+// keep gradient before clipping); lower = highlights clip sooner. Live-tunable.
+uniform float tonemap_white : hint_range(2.0, 16.0) = 6.0;
 
 uniform sampler2D sky_texture : filter_nearest;
 uniform sampler2D blackbody_lut : filter_linear, repeat_disable;
@@ -88,10 +92,6 @@ const float HDR_BLOOM_KNEE = 0.62;
 const float HDR_EMISSION_GAIN = 1.26;
 const float USE_REINHARD_TONEMAP = 0.0;
 const float EMISSION_SOFT_CLIP = 0.72;
-// Highlight white point for FilmicDisplay's extended-Reinhard shoulder: the HDR
-// luminance that maps to ~1.0. Higher = more highlight headroom (brighter cores
-// keep gradient before clipping); lower = highlights clip sooner. Edit to taste.
-const float TONEMAP_WHITE = 6.0;
 const float DISK_HAZE_CONTRAST = 0.66;
 const float DISK_OPACITY_GAIN = 1.10;
 const float DISK_CORE_OPACITY_GAIN = 1.28;
@@ -401,9 +401,9 @@ vec3 FilmicDisplay(vec3 color) {
     // shoulder, so the approaching disk side clipped to a structureless white
     // blob. Here the curve compresses brightness while the hue/structure survive;
     // a controlled desaturation only at the very top keeps the hottest core from
-    // looking unnaturally saturated. TONEMAP_WHITE = HDR level mapped to ~1.0.
+    // looking unnaturally saturated. tonemap_white = HDR level mapped to ~1.0.
     float l = Luminance(safe_color);
-    float lt = l * (1.0 + l / (TONEMAP_WHITE * TONEMAP_WHITE)) / (1.0 + l);
+    float lt = l * (1.0 + l / (tonemap_white * tonemap_white)) / (1.0 + l);
     vec3 tinted = safe_color * (lt / max(l, 1e-5));
     float desat = clamp((lt - 0.85) / 0.15, 0.0, 1.0) * 0.5;
     return clamp(mix(tinted, vec3(lt), desat), vec3(0.0), vec3(1.0));
