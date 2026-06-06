@@ -88,6 +88,10 @@ const float HDR_BLOOM_KNEE = 0.62;
 const float HDR_EMISSION_GAIN = 1.26;
 const float USE_REINHARD_TONEMAP = 0.0;
 const float EMISSION_SOFT_CLIP = 0.72;
+// Highlight white point for FilmicDisplay's extended-Reinhard shoulder: the HDR
+// luminance that maps to ~1.0. Higher = more highlight headroom (brighter cores
+// keep gradient before clipping); lower = highlights clip sooner. Edit to taste.
+const float TONEMAP_WHITE = 6.0;
 const float DISK_HAZE_CONTRAST = 0.66;
 const float DISK_OPACITY_GAIN = 1.10;
 const float DISK_CORE_OPACITY_GAIN = 1.28;
@@ -391,7 +395,18 @@ float Luminance(vec3 color) {
 
 vec3 FilmicDisplay(vec3 color) {
     vec3 safe_color = max(color, vec3(0.0));
-    return 1.0 - exp(-safe_color * 0.82);
+    // Tonemap on luminance with an extended-Reinhard shoulder, then reapply the
+    // original chroma. The old per-channel "1 - exp(-c*0.82)" washed bright pixels
+    // to flat white (every channel independently saturated to 1) AND had no
+    // shoulder, so the approaching disk side clipped to a structureless white
+    // blob. Here the curve compresses brightness while the hue/structure survive;
+    // a controlled desaturation only at the very top keeps the hottest core from
+    // looking unnaturally saturated. TONEMAP_WHITE = HDR level mapped to ~1.0.
+    float l = Luminance(safe_color);
+    float lt = l * (1.0 + l / (TONEMAP_WHITE * TONEMAP_WHITE)) / (1.0 + l);
+    vec3 tinted = safe_color * (lt / max(l, 1e-5));
+    float desat = clamp((lt - 0.85) / 0.15, 0.0, 1.0) * 0.5;
+    return clamp(mix(tinted, vec3(lt), desat), vec3(0.0), vec3(1.0));
 }
 
 vec3 HdrBloomSource(vec3 hdr_color) {
