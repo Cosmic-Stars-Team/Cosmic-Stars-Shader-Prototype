@@ -75,7 +75,7 @@ const mat3 OCTAVE_ROT = mat3(
 const float DISK_TEMPERATURE_ARGUMENT = 1.4e19;
 const float PEAK_TEMPERATURE_POW4 = 5.665278e18;
 const float DISK_TEMP_KELVIN_MIN = 1200.0;
-const float DISK_TEMP_KELVIN_MAX = 22000.0;
+const float DISK_TEMP_KELVIN_MAX = 40000.0; // 上限够到蓝白黑体；标准盘温度远到不了此值，无影响
 const float DISK_WHITE_MIX = 0.002;
 const float DISK_BRIGHTNESS_FLOOR = 0.0045;
 const float DISK_RGB_FLOOR = 0.0025;
@@ -835,6 +835,13 @@ vec4 calculate_disk_color(
             float thermal_kelvin = disk_temperature / exp((pos_r - inter_radius) / (0.6 * max(outer_radius - inter_radius, 1e-6)));
             thermal_kelvin *= disk_temperature_scale;
             thermal_kelvin = clamp(thermal_kelvin, DISK_TEMP_KELVIN_MIN, DISK_TEMP_KELVIN_MAX);
+            // Physical gate for the warm/red artistic terms below. They are keyed
+            // on the Doppler-cold side, not on temperature, so at extreme thermal
+            // scales (hot blue disk) they used to leave an unphysical red/brown
+            // contamination. Fade them out as disk_temperature_scale rises:
+            //   scale ~0.84 (normal warm disk) -> warm_keep = 1.0 (identical look)
+            //   scale >= 4.0 (hot blue preset) -> warm_keep = 0.0 (pure blackbody blue)
+            float warm_keep = 1.0 - smoothstep(2.0, 4.0, disk_temperature_scale);
             vec3 thermal_rgb = DiskTemperatureToRgb(thermal_kelvin);
             float hot_side = smoothstep(0.90, 1.68, dopler);
             float inner_rim = exp(-9.0 * radial01);
@@ -844,7 +851,9 @@ vec4 calculate_disk_color(
             float grazing_view = smoothstep(0.18, 0.95, sqrt(max(1.0 - dir_on_disk.y * dir_on_disk.y, 0.0)));
             float rim_light = inner_rim * (0.32 + 0.68 * grazing_view) * (0.36 + 0.64 * hot_side);
 
-            thermal_rgb *= mix(DISK_WARM_TINT, DISK_HOT_TINT, hot_side);
+            // warm_keep fades the cold-side warm tint toward neutral white at high
+            // temperature; the hot-side blue (DISK_HOT_TINT) is always allowed.
+            thermal_rgb *= mix(mix(vec3(1.0), DISK_WARM_TINT, warm_keep), DISK_HOT_TINT, hot_side);
             thermal_rgb = mix(thermal_rgb, DISK_RIM_TINT, 0.30 * inner_rim * hot_side);
             thermal_rgb = mix(thermal_rgb, DISK_RING_CORE_TINT, 0.22 * ring_core * (0.45 + 0.55 * hot_side));
             float white_heat = clamp(0.20 * hot_side + 0.12 * inner_rim + 0.06 * ring_core, 0.0, 0.34);
@@ -897,7 +906,7 @@ vec4 calculate_disk_color(
             color.rgb *= mix(DISK_HAZE_CONTRAST, 1.16, strand_mask);
             color.rgb *= mix(0.94, 1.18, filament_core);
             color.rgb *= mix(vec3(1.0), vec3(0.55, 0.94, 1.72), hot_side * (0.22 + 0.78 * strand_mask));
-            color.rgb *= mix(vec3(1.0), vec3(1.46, 0.34, 0.16), cold_side * (0.14 + 0.86 * strand_mask));
+            color.rgb *= mix(vec3(1.0), vec3(1.46, 0.34, 0.16), cold_side * warm_keep * (0.14 + 0.86 * strand_mask));
             color.rgb *= mix(vec3(1.0), DISK_SHADOW_TINT, clamp(volume_shadow * 0.36, 0.0, 0.72));
             color.rgb *= mix(vec3(1.0), DISK_RING_SHADOW_TINT, clamp(ring_shadow_band * cold_side * (1.0 - 0.55 * filament_core) * 0.34, 0.0, 0.55));
             color.rgb *= 1.0 + disk_layers * layer_visibility * (0.48 + 0.24 * hot_side + 0.20 * lensed_arc);
@@ -922,10 +931,10 @@ vec4 calculate_disk_color(
             artistic_emission += DISK_BLUE_RIM_EMISSION * emission_luma * hot_white_core * 0.22;
             float blue_side = rim_light * hot_side * (0.35 + 0.65 * strand_mask) * (0.45 + 0.55 * grazing_view);
             artistic_emission += DISK_BLUE_RIM_EMISSION * emission_luma * blue_side * DISK_BLUE_SIDE_BOOST;
-            float red_side = cold_side * smoothstep(0.08, 0.70, color.a) *
+            float red_side = cold_side * warm_keep * smoothstep(0.08, 0.70, color.a) *
                 (0.28 + 0.72 * radial01) * strand_mask *
                 clamp(0.92 * ring_halo + 0.30 * inner_key, 0.0, 1.0);
-            float red_body_light = cold_side * smoothstep(0.06, 0.62, color.a) *
+            float red_body_light = cold_side * warm_keep * smoothstep(0.06, 0.62, color.a) *
                 (0.28 + 0.72 * radial01) * (0.32 + 0.68 * grazing_view) *
                 (0.30 + 0.70 * disk_layers);
             artistic_emission += DISK_RED_FILL_EMISSION * emission_luma * red_body_light * 0.32;

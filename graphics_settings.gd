@@ -25,8 +25,17 @@ const RESOLUTIONS := [
 	{ "name": "全屏", "size": Vector2i.ZERO },
 ]
 
+# 吸积盘温度档。scale 套到材质 disk_temperature_scale。
+#   标准暖盘 0.84：与原效果一致（warm_keep≈1，保留暖/红艺术补光）
+#   高温蓝盘 5.0：温度顶到 40000K 黑体蓝，且 warm_keep→0 自动关掉红/暖染色，物理正确的纯蓝
+const DISK_TEMP_PRESETS := [
+	{ "name": "标准暖盘", "scale": 0.84 },
+	{ "name": "高温蓝盘（~40000K）", "scale": 5.0 },
+]
+
 var quality_index := 1    # 默认“流畅”
 var resolution_index := 1 # 默认 1080p
+var disk_temp_index := 0  # 默认标准暖盘
 var vsync_on := true
 
 var _material: ShaderMaterial
@@ -34,6 +43,7 @@ var _ui: CanvasLayer
 var _panel: Control
 var _quality_option: OptionButton
 var _resolution_option: OptionButton
+var _disk_temp_option: OptionButton
 var _vsync_check: CheckBox
 
 func _ready() -> void:
@@ -54,7 +64,13 @@ func _input(event: InputEvent) -> void:
 func _apply_all() -> void:
 	_apply_quality()
 	_apply_resolution()
+	_apply_disk_temp()
 	_apply_vsync()
+
+func _apply_disk_temp() -> void:
+	if _material:
+		var t: Dictionary = DISK_TEMP_PRESETS[disk_temp_index]
+		_material.set_shader_parameter("disk_temperature_scale", float(t["scale"]))
 
 func _apply_quality() -> void:
 	var p: Dictionary = QUALITY_PRESETS[quality_index]
@@ -90,6 +106,7 @@ func _load_config() -> bool:
 		return false
 	quality_index = clampi(cfg.get_value("graphics", "quality", quality_index), 0, QUALITY_PRESETS.size() - 1)
 	resolution_index = clampi(cfg.get_value("graphics", "resolution", resolution_index), 0, RESOLUTIONS.size() - 1)
+	disk_temp_index = clampi(cfg.get_value("graphics", "disk_temp", disk_temp_index), 0, DISK_TEMP_PRESETS.size() - 1)
 	vsync_on = bool(cfg.get_value("graphics", "vsync", vsync_on))
 	return true
 
@@ -97,6 +114,7 @@ func _save_config() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("graphics", "quality", quality_index)
 	cfg.set_value("graphics", "resolution", resolution_index)
+	cfg.set_value("graphics", "disk_temp", disk_temp_index)
 	cfg.set_value("graphics", "vsync", vsync_on)
 	cfg.save(CONFIG_PATH)
 
@@ -148,6 +166,14 @@ func _build_ui() -> void:
 	_resolution_option.selected = resolution_index
 	vbox.add_child(_resolution_option)
 
+	# 吸积盘温度
+	vbox.add_child(_make_row_label("吸积盘温度"))
+	_disk_temp_option = OptionButton.new()
+	for t in DISK_TEMP_PRESETS:
+		_disk_temp_option.add_item(t["name"])
+	_disk_temp_option.selected = disk_temp_index
+	vbox.add_child(_disk_temp_option)
+
 	# 垂直同步
 	_vsync_check = CheckBox.new()
 	_vsync_check.text = "垂直同步（防撕裂，建议开）"
@@ -183,6 +209,7 @@ func _make_row_label(text: String) -> Label:
 func _on_apply_pressed() -> void:
 	quality_index = _quality_option.selected
 	resolution_index = _resolution_option.selected
+	disk_temp_index = _disk_temp_option.selected
 	vsync_on = _vsync_check.button_pressed
 	_apply_all()
 	_save_config()
@@ -195,6 +222,7 @@ func _set_panel_visible(v: bool) -> void:
 		if v:
 			_quality_option.selected = quality_index
 			_resolution_option.selected = resolution_index
+			_disk_temp_option.selected = disk_temp_index
 			_vsync_check.button_pressed = vsync_on
 
 
