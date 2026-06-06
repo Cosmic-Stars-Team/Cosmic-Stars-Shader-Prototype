@@ -2,8 +2,8 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dsmpcxv4t3wyn"
-path.bptc="res://.godot/imported/blackbody_1d_lut_4k.exr-c666f694194c2e8e5880fb981f4c4e36.bptc.ctex"
+uid="uid://cdjuddtyvblls"
+path.bptc="res://.godot/imported/starmap_2020_8k.exr-bd69663cde209b5520a837d045347a13.bptc.ctex"
 metadata={
 "imported_formats": ["s3tc_bptc"],
 "vram_texture": true
@@ -11,8 +11,8 @@ metadata={
 
 [deps]
 
-source_file="res://lud/blackbody_1d_lut_4k.exr"
-dest_files=["res://.godot/imported/blackbody_1d_lut_4k.exr-c666f694194c2e8e5880fb981f4c4e36.bptc.ctex"]
+source_file="res://assets/starmap_2020_8k.exr"
+dest_files=["res://.godot/imported/starmap_2020_8k.exr-bd69663cde209b5520a837d045347a13.bptc.ctex"]
 
 [params]
 
@@ -35,7 +35,7 @@ process/channel_remap/alpha=3
 process/fix_alpha_border=true
 process/premult_alpha=false
 process/normal_map_invert_y=false
-process/hdr_as_srgb=false
-process/hdr_clamp_exposure=false
+process/hdr_as_srgb=true
+process/hdr_clamp_exposure=true
 process/size_limit=0
 detect_3d/compress_to=0

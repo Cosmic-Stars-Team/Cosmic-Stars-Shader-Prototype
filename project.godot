@@ -15,6 +15,15 @@ run/main_scene="uid://5ei7qpnejdmw"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
+[autoload]
+
+GraphicsSettings="*res://graphics_settings.gd"
+
+[display]
+
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+
 [physics]
 
 3d/physics_engine="Jolt Physics"
@@ -22,7 +31,7 @@ config/icon="res://icon.svg"
 [rendering]
 
 rendering_device/driver.windows="d3d12"
+scaling_3d/mode=2
+scaling_3d/scale=0.77
 anti_aliasing/quality/use_taa=true
 rendering/viewport/hdr_2d=true
-scaling_3d/mode=2
-scaling_3d/scale=0.7

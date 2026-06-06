@@ -29,6 +29,11 @@ var is_aim_dragging := false
 
 const EPS := 0.00001
 
+# FPS 标题栏显示
+var _fps_accum := 0.0
+var _fps_frames := 0
+var _fps_timer := 0.0
+
 func _ready() -> void:
 	current_distance = target_distance
 	current_yaw = target_yaw
@@ -79,6 +84,24 @@ func _process(delta: float) -> void:
 	current_aim_offset = current_aim_offset.lerp(target_aim_offset, t)
 
 	update_camera()
+	_update_fps_title(delta)
+
+func _update_fps_title(delta: float) -> void:
+	# 累积 0.5 秒求平均帧时间，避免标题数字乱跳
+	_fps_accum += delta
+	_fps_frames += 1
+	_fps_timer += delta
+	if _fps_timer >= 0.5:
+		var avg_ms: float = (_fps_accum / float(_fps_frames)) * 1000.0
+		var fps: float = 1000.0 / max(avg_ms, EPS)
+		var size := get_viewport().get_visible_rect().size
+		DisplayServer.window_set_title(
+			"BlackHole  |  %.1f FPS  |  %.2f ms  |  %dx%d"
+			% [fps, avg_ms, int(size.x), int(size.y)]
+		)
+		_fps_accum = 0.0
+		_fps_frames = 0
+		_fps_timer = 0.0
 
 func _smooth_snap(current: float, target: float, t: float) -> float:
 	var v: float = lerpf(current, target, t)
@@ -114,11 +137,12 @@ func update_camera() -> void:
 func take_screenshot() -> void:
 	var img: Image = get_viewport().get_texture().get_image()
 	var time_stamp: String = str(Time.get_unix_time_from_system()).replace(".", "")
-	var file_path: String = "res://BH_Shot_" + time_stamp + ".png"
+	# 存到 user://（系统用户数据目录），不污染工程目录
+	var file_path: String = "user://BH_Shot_" + time_stamp + ".png"
 	var err: int = img.save_png(file_path)
 
 	if err == OK:
-		print("【截图成功】", file_path)
+		print("【截图成功】", ProjectSettings.globalize_path(file_path))
 	else:
 		print("【截图失败】错误码 -> ", err)
 		

@@ -22,6 +22,36 @@ uniform sampler2D far_field_deflection_lut : filter_linear, repeat_disable;
 // bake a pixel-identical version.
 uniform sampler3D noise_texture : filter_linear, repeat_enable;
 uniform float noise_texture_scale = 0.15;
+// 0 = texture fetch (fast, blurred high freqs — Performance tier)
+// 1 = procedural 8-corner hash like the reference (crisp filaments, costs more — High tier)
+uniform int noise_mode = 1;
+
+// --- Hybrid fBm controls (see GenerateAccretionDiskNoise) ---
+// Octave level at/above which fBm switches from the 64^3 texture LUT (cheap,
+// perfect for low freqs) to the procedural PCG hash (crisp, no resolution
+// ceiling). Octaves below this read the texture; octaves >= this go procedural.
+// Higher = more octaves on the cheap texture path = faster, softer.
+uniform int noise_hybrid_split = 2;
+
+// Manual high-frequency LOD. This is a raymarched volume, so there is no clean
+// screen-space derivative to drive automatic AA; instead the quality preset
+// dials this up on low/FSR2 tiers to fade the highest octaves and kill shimmer,
+// and leaves it at 0 on High for full detail. Roughly: noise-domain texels per
+// pixel. Fade per octave = clamp(1 - footprint * octave_frequency, 0, 1).
+uniform float noise_detail_footprint = 0.0;
+
+// Domain-warp strength for the disk clouds: a low-freq noise offsets the cloud
+// sampling domain so strands curl and pile into discrete layered bands instead
+// of a smooth radial gradient. 0 = off (original). Live-tunable.
+uniform float disk_domain_warp = 0.6;
+
+// --- RESERVED for future "relativistic fly-around" feature (not yet wired) ---
+// Camera velocity in world space as a fraction of c (β = v/c), to be set per
+// frame by the camera script from its path derivative. When the SR optics are
+// implemented this drives observer-frame aberration / Doppler / beaming of the
+// sky and disk. Default (0,0,0) = static observer = ZERO visual change, so it is
+// safe to leave declared. See docs: camera-side computes β, shader applies boost.
+uniform vec3 camera_beta = vec3(0.0, 0.0, 0.0);
 
 const float BASE_STEP = 0.02;
 const float TIME_RATE = 8.0;
@@ -32,6 +62,16 @@ const float DISK_OUTER_SPIN_RATIO = 0.6;
 const float DISK_VISUAL_TIME_SCALE = 0.02;
 const float DISK_NOISE_SCALE = 1.1;
 const float DISK_NOISE_CONTRAST = 80.0;
+// Fixed orthonormal rotation applied to the domain each fBm octave. Value noise
+// pins its extrema to the integer lattice; with an integer lacunarity (3.0) the
+// octaves would align axis-wise and show a faint grid/cross weave. Rotating the
+// domain per octave decorrelates them at ~zero cost. (Rodrigues rotation about
+// a normalized axis by ~0.7 rad — arbitrary, just non-axis-aligned.)
+const mat3 OCTAVE_ROT = mat3(
+    vec3(0.81649658, 0.49236596, -0.30151134),
+    vec3(-0.40824829, 0.86562296, 0.29361284),
+    vec3(0.40824829, -0.09405968, 0.90791226)
+);
 const float DISK_TEMPERATURE_ARGUMENT = 1.4e19;
 const float PEAK_TEMPERATURE_POW4 = 5.665278e18;
 const float DISK_TEMP_KELVIN_MIN = 1200.0;
@@ -65,7 +105,11 @@ const float DISK_MIDLINE_SHADOW_STRENGTH = 0.20;
 const float DISK_LAYER_SHADOW_STRENGTH = 0.28;
 const float DISK_EDGE_SOFTNESS_RS = 0.12;
 const float DISK_VERTICAL_EDGE_SOFTNESS = 0.22;
-const float DISK_LENSED_ARC_DETAIL = 0.72;
+// The lensed arc is the disk's far side compressed near edge-on by lensing, so
+// it's heavily undersampled. Boosting high-freq detail there scatters into bright
+// grain ("不实"). Keep this modest and instead let the arc read as coherent gas;
+// the micro_strand/micro_filament arc terms below now suppress rather than boost.
+const float DISK_LENSED_ARC_DETAIL = 0.35;
 const float DISK_LENSED_ARC_DUST_SUPPRESS = 0.42;
 const float LENS_SKY_BOOST = 0.25;
 const float LENS_STAR_BOOST = 5.0;
@@ -142,11 +186,69 @@ float RandomStep(vec2 input_uv, float seed) {
     return fract((p.x + p.y) * p.z);
 }
 
-float PerlinNoise(vec3 position) {
-    // (b) Texture-fetch path: hardware trilinear filtering + tiling replaces the
-    // 8-corner hash. repeat_enable lets any position wrap into the texture.
-    // *2-1 remaps the texture's [0,1] back to the procedural noise's ~[-1,1].
+float CubicInterpolate(float x) {
+    return 3.0 * x * x - 2.0 * x * x * x;
+}
+
+// Portable integer hash (Jarzynski & Olano, "Hash Functions for GPU Rendering").
+// Replaces the old fract(sin(...)) hash, whose result depends on each GPU's sin()
+// precision and drifts/banding across NVIDIA/AMD/Intel/mobile. This is integer
+// bit-ops only: bit-identical on every device, and cheaper than 8x sin().
+uint PcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Hashed value in [-1, 1] for an integer lattice corner. ivec3->uvec3 keeps the
+// two's-complement bit pattern, so negative coords stay deterministic.
+float LatticeValue(vec3 corner) {
+    uvec3 c = uvec3(ivec3(corner));
+    uint h = PcgHash(c.x ^ PcgHash(c.y ^ PcgHash(c.z)));
+    return 2.0 * (float(h) * (1.0 / 4294967296.0)) - 1.0;
+}
+
+// Procedural value noise: unique hashed value per integer lattice corner,
+// cubic-smoothed trilinear blend. No resolution ceiling, so the high fBm
+// octaves actually produce crisp filaments instead of aliasing into blur.
+float ProceduralNoise(vec3 position) {
+    vec3 pos_int = floor(position);
+    vec3 pos_fract = fract(position);
+    float v000 = LatticeValue(pos_int + vec3(0.0, 0.0, 0.0));
+    float v100 = LatticeValue(pos_int + vec3(1.0, 0.0, 0.0));
+    float v010 = LatticeValue(pos_int + vec3(0.0, 1.0, 0.0));
+    float v110 = LatticeValue(pos_int + vec3(1.0, 1.0, 0.0));
+    float v001 = LatticeValue(pos_int + vec3(0.0, 0.0, 1.0));
+    float v101 = LatticeValue(pos_int + vec3(1.0, 0.0, 1.0));
+    float v011 = LatticeValue(pos_int + vec3(0.0, 1.0, 1.0));
+    float v111 = LatticeValue(pos_int + vec3(1.0, 1.0, 1.0));
+    float cz = CubicInterpolate(pos_fract.z);
+    float cz1 = CubicInterpolate(1.0 - pos_fract.z);
+    float v00 = v001 * cz + v000 * cz1;
+    float v10 = v101 * cz + v100 * cz1;
+    float v01 = v011 * cz + v010 * cz1;
+    float v11 = v111 * cz + v110 * cz1;
+    float cy = CubicInterpolate(pos_fract.y);
+    float cy1 = CubicInterpolate(1.0 - pos_fract.y);
+    float v0 = v01 * cy + v00 * cy1;
+    float v1 = v11 * cy + v10 * cy1;
+    return v1 * CubicInterpolate(pos_fract.x) + v0 * CubicInterpolate(1.0 - pos_fract.x);
+}
+
+float NoiseTextureFetch(vec3 position) {
+    // Hardware trilinear + tiling. Cheap and perfectly smooth for LOW freqs;
+    // anything above the 64^3 LUT's Nyquist just blurs, so the fBm loop only
+    // ever sends low octaves here.
     return texture(noise_texture, position * noise_texture_scale).r * 2.0 - 1.0;
+}
+
+float PerlinNoise(vec3 position) {
+    // Single-sample entry (domain warp, jitter): low-freq, so honor noise_mode
+    // as a global override without per-octave logic.
+    if (noise_mode == 1) {
+        return ProceduralNoise(position);
+    }
+    return NoiseTextureFetch(position);
 }
 
 float SoftSaturate(float x) {
@@ -158,9 +260,28 @@ float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise
     // Running frequency multiply replaces a pow(3.0, level) per octave — this is
     // the hottest loop in the shader, so dropping the per-octave exp/log matters.
     float noise_frequency = pow(3.0, float(noise_start_level));
+    // Per-octave domain rotation (decorrelates value-noise grid). Seed it so the
+    // start octave isn't axis-aligned either.
+    mat3 rot = mat3(1.0);
     for (int level = noise_start_level; level < noise_end_level; ++level) {
-        noise_accumulator *= (1.0 + 0.1 * PerlinNoise(noise_frequency * position));
+        vec3 sample_pos = rot * (noise_frequency * position);
+
+        // Hybrid: low octaves from the texture LUT, high octaves procedural.
+        // noise_mode == 0 forces the whole loop onto the (cheapest) texture path.
+        float octave_noise;
+        if (noise_mode == 0 || level < noise_hybrid_split) {
+            octave_noise = NoiseTextureFetch(sample_pos);
+        } else {
+            octave_noise = ProceduralNoise(sample_pos);
+        }
+
+        // Manual high-freq LOD: fade octaves the current sampling rate can't
+        // resolve. footprint == 0 (High tier) is a no-op -> full detail.
+        float octave_fade = clamp(1.0 - noise_detail_footprint * noise_frequency, 0.0, 1.0);
+
+        noise_accumulator *= (1.0 + 0.1 * octave_fade * octave_noise);
         noise_frequency *= 3.0;
+        rot = OCTAVE_ROT * rot;
     }
     return log(1.0 + pow(max(0.1 * noise_accumulator, 1e-6), contrast_level));
 }
@@ -548,11 +669,19 @@ vec4 calculate_disk_color(
                 0.34 * pos_theta,
                 vertical_domain * 0.28
             ));
-            float layer_phase = rot_pos_r * 20.0 + layer_warp * 1.30 + pos_theta * 0.10 + visual_phase * 0.85;
+            // Second, angle-varying warp so the radial bands wobble around the
+            // ring instead of staying perfectly concentric.
+            float layer_warp_ang = PerlinNoise(vec3(
+                rot_pos_r * 1.30 + 0.10 * visual_phase,
+                1.10 * pos_theta + 3.7,
+                vertical_domain * 0.5 + 1.9
+            ));
+            float ring_break = layer_warp * 4.5 + layer_warp_ang * 5.5 + pos_theta * 0.9;
+            float layer_phase = rot_pos_r * 20.0 + ring_break + visual_phase * 0.85;
             float radial_layer = Ridge(layer_phase, 7.0);
             float radial_gap = Ridge(layer_phase + kPi, 5.0);
-            float fine_layer = Ridge(rot_pos_r * 58.0 + layer_warp * 2.6 + pos_theta * 0.28, 17.0);
-            float micro_layer = Ridge(rot_pos_r * 108.0 + layer_warp * 4.0 + pos_theta * 0.52, 28.0);
+            float fine_layer = Ridge(rot_pos_r * 58.0 + layer_warp * 6.5 + layer_warp_ang * 4.0 + pos_theta * 1.4, 17.0);
+            float micro_layer = Ridge(rot_pos_r * 108.0 + layer_warp * 9.0 + layer_warp_ang * 6.0 + pos_theta * 2.2, 28.0);
             float disk_layers = clamp(
                 radial_layer * DISK_RADIAL_LAYER_STRENGTH +
                     fine_layer * DISK_FINE_LAYER_STRENGTH +
@@ -575,13 +704,22 @@ vec4 calculate_disk_color(
                     3,
                     DISK_NOISE_CONTRAST
                 ));
-                thick = thin * density * (0.36 + 0.54 * thickness_noise);
+                thick = thin * density * (0.48 + 0.66 * thickness_noise);
                 vertical_mix_factor = max(0.0, 1.0 - abs(pos_y) / max(thick, 1e-6));
-                float vertical_core = pow(vertical_mix_factor, 1.08);
+                float vertical_core = pow(vertical_mix_factor, 0.78);
                 density *= 0.70 * vertical_core * density;
 
+                // Low-freq domain warp shared by the cloud/strand samples so they
+                // curl coherently into layered bands. 3 cheap fetches per disk step.
+                vec3 warp_base = vec3(rot_pos_r * 0.6, cloud_theta * 0.5, vertical_domain * 0.6);
+                vec3 domain_warp = disk_domain_warp * vec3(
+                    PerlinNoise(warp_base),
+                    PerlinNoise(warp_base + vec3(31.4, 11.7, 5.2)),
+                    PerlinNoise(warp_base + vec3(7.9, 23.1, 17.6))
+                );
+
                 float cloud_value = GenerateAngularAccretionDiskNoise(
-                    vec3(rot_pos_r, vertical_domain, 0.5 * cloud_theta),
+                    vec3(rot_pos_r, vertical_domain, 0.5 * cloud_theta) + domain_warp,
                     2,
                     cloud_theta,
                     0.5,
@@ -591,7 +729,7 @@ vec4 calculate_disk_color(
                 );
 
                 float strand_detail = GenerateAngularAccretionDiskNoise(
-                    vec3(rot_pos_r, 1.5 * strand_theta, vertical_domain),
+                    vec3(rot_pos_r, 1.5 * strand_theta, vertical_domain) + domain_warp,
                     1,
                     strand_theta,
                     1.5,
@@ -607,7 +745,7 @@ vec4 calculate_disk_color(
                 float structured_cloud = mix(continuity_fill * cloud_soft, cloud_value, cloud_gate);
                 color0 = vec4(vec3(structured_cloud), structured_cloud * (0.56 + 0.44 * strand_gate));
                 float micro_strand = SoftSaturate(GenerateAngularAccretionDiskNoise(
-                    vec3(rot_pos_r * 1.75 + 0.08 * layer_warp, 3.0 * strand_theta, vertical_domain * 1.35),
+                    vec3(rot_pos_r * 1.75 + 0.08 * layer_warp, 3.0 * strand_theta, vertical_domain * 1.35) + 1.5 * domain_warp,
                     1,
                     strand_theta,
                     3.0,
@@ -615,7 +753,9 @@ vec4 calculate_disk_color(
                     4,
                     46.0
                 ));
-                micro_strand *= strand_gate * (0.35 + 0.65 * vertical_core) * (1.0 + 0.45 * lensed_arc);
+                // Suppress (not amplify) micro detail in the lensed arc: it's the
+                // undersampled region, so high-freq strands there read as grain.
+                micro_strand *= strand_gate * (0.35 + 0.65 * vertical_core) * (1.0 - 0.30 * lensed_arc);
                 float structure_gate = clamp(0.38 + 0.50 * strand_gate + 0.38 * disk_layers + 0.16 * micro_strand, 0.28, 1.0);
                 float layer_gain = 1.0 + disk_layers * (0.48 + 0.34 * vertical_core);
                 float layer_shadow = 1.0 - DISK_LAYER_SHADOW_STRENGTH * radial_gap *
@@ -623,7 +763,7 @@ vec4 calculate_disk_color(
                 color0.xyz *= density * 1.4 * (
                     0.14 + 0.76 * vertical_core +
                     (0.82 - 0.58 * vertical_core) * strand_gate +
-                    DISK_MICRO_FILAMENT_STRENGTH * micro_strand * (1.0 + 0.35 * lensed_arc)
+                    DISK_MICRO_FILAMENT_STRENGTH * micro_strand * (1.0 - 0.20 * lensed_arc)
                 ) * noise_amount * layer_gain * layer_shadow;
                 color0.a *= density * structure_gate * clamp(noise_amount, 0.35, 1.45) *
                     mix(0.90, 1.14, radial_layer) * mix(1.0, 0.86, radial_gap) *

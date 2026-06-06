@@ -1,28 +1,31 @@
 [gd_resource type="ShaderMaterial" format=3 uid="uid://qxooc2475gd5"]
 
 [ext_resource type="Shader" uid="uid://gd3gu4hc0c3m" path="res://BlackHole.gdshader" id="1_sjfy6"]
-[ext_resource type="Texture2D" uid="uid://cdjuddtyvblls" path="res://starmap_2020_8k.exr" id="2_q56d7"]
-[ext_resource type="Texture2D" uid="uid://dsmpcxv4t3wyn" path="res://lud/blackbody_1d_lut_4k.exr" id="3_bbody"]
-[ext_resource type="Texture2D" uid="uid://dhiewm2gfklbu" path="res://lud/far_field_ray_deflection_lut_rs1_4096.exr" id="4_farfield"]
+[ext_resource type="Texture2D" uid="uid://cdjuddtyvblls" path="res://assets/starmap_2020_8k.exr" id="2_q56d7"]
+[ext_resource type="Texture2D" uid="uid://dsmpcxv4t3wyn" path="res://assets/blackbody_1d_lut_4k.exr" id="3_bbody"]
+[ext_resource type="Texture2D" uid="uid://dhiewm2gfklbu" path="res://assets/far_field_ray_deflection_lut_rs1_4096.exr" id="4_farfield"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_noise"]
 noise_type = 3
-frequency = 0.05
+frequency = 0.02
 
 [sub_resource type="NoiseTexture3D" id="NoiseTexture3D_noise"]
-noise = SubResource("FastNoiseLite_noise")
+width = 64
+height = 64
+depth = 64
 seamless = true
+noise = SubResource("FastNoiseLite_noise")
 
 [resource]
 render_priority = 0
 shader = ExtResource("1_sjfy6")
 shader_parameter/Rs = 4.0
 shader_parameter/gravity_strength = 1.0
-shader_parameter/steps = 512
+shader_parameter/steps = 320
 shader_parameter/disk_tilt = -0.3
 shader_parameter/disk_inner_radius_ratio = 2.5
-shader_parameter/disk_outer_radius_ratio = 6.6
-shader_parameter/disk_thickness_ratio = 0.4
+shader_parameter/disk_outer_radius_ratio = 6.0
+shader_parameter/disk_thickness_ratio = 0.55
 shader_parameter/disk_noise_amount = 1.2
 shader_parameter/disk_temperature_scale = 0.84
 shader_parameter/output_exposure = 1.28
@@ -31,3 +34,5 @@ shader_parameter/blackbody_lut = ExtResource("3_bbody")
 shader_parameter/far_field_deflection_lut = ExtResource("4_farfield")
 shader_parameter/noise_texture = SubResource("NoiseTexture3D_noise")
 shader_parameter/noise_texture_scale = 0.15
+shader_parameter/noise_hybrid_split = 3
+shader_parameter/noise_detail_footprint = 0.0015
