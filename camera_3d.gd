@@ -41,7 +41,9 @@ func _ready() -> void:
 	current_aim_offset = target_aim_offset
 	update_camera()
 
-func _input(event: InputEvent) -> void:
+func _unhandled_input(event: InputEvent) -> void:
+	# 用 _unhandled_input：UI（科普标注名字框、画质面板）先吃掉点击，
+	# 落在它们上的点击不会再触发相机拖拽。空白处拖拽照常旋转。
 	# 鼠标按键
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:

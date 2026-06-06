@@ -3,6 +3,7 @@
 [ext_resource type="Script" uid="uid://u8inby805ucp" path="res://camera_3d.gd" id="1_5vpqt"]
 [ext_resource type="Material" uid="uid://qxooc2475gd5" path="res://materials/blackhole_live.tres" id="3_m0g2x"]
 [ext_resource type="Material" path="res://materials/cinematic_post_process.tres" id="4_post"]
+[ext_resource type="Script" path="res://feature_annotations.gd" id="5_annot"]
 
 [sub_resource type="QuadMesh" id="QuadMesh_yefb3"]
 material = ExtResource("3_m0g2x")
@@ -61,3 +62,6 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
+
+[node name="FeatureAnnotations" type="CanvasLayer" parent="."]
+script = ExtResource("5_annot")
