@@ -142,42 +142,11 @@ float RandomStep(vec2 input_uv, float seed) {
     return fract((p.x + p.y) * p.z);
 }
 
-float CubicInterpolate(float x) {
-    return 3.0 * x * x - 2.0 * x * x * x;
-}
-
-void HashCorners3D(vec3 cell, out vec4 z0, out vec4 z1) {
-    vec4 x = vec4(cell.x, cell.x + 1.0, cell.x, cell.x + 1.0);
-    vec4 y = vec4(cell.y, cell.y, cell.y + 1.0, cell.y + 1.0);
-    vec4 p0 = fract(vec4(cell.z) * 0.1099 + x * 0.1031 + y * 0.0973);
-    vec4 p1 = fract(vec4(cell.z + 1.0) * 0.1099 + x * 0.1031 + y * 0.0973);
-
-    p0 += dot(p0, p0.yzwx + 33.33);
-    p1 += dot(p1, p1.yzwx + 33.33);
-
-    z0 = fract((p0 + p0.yzwx) * p0.wxyz) * 2.0 - 1.0;
-    z1 = fract((p1 + p1.yzwx) * p1.wxyz) * 2.0 - 1.0;
-}
-
 float PerlinNoise(vec3 position) {
     // (b) Texture-fetch path: hardware trilinear filtering + tiling replaces the
     // 8-corner hash. repeat_enable lets any position wrap into the texture.
     // *2-1 remaps the texture's [0,1] back to the procedural noise's ~[-1,1].
     return texture(noise_texture, position * noise_texture_scale).r * 2.0 - 1.0;
-}
-
-float PerlinNoiseProcedural(vec3 position) {
-    vec3 pos_int = floor(position);
-    vec3 pos_float = fract(position);
-
-    vec4 z0;
-    vec4 z1;
-    HashCorners3D(pos_int, z0, z1);
-
-    vec3 u = pos_float * pos_float * (3.0 - 2.0 * pos_float);
-    vec4 z_mix = mix(z0, z1, u.z);
-    vec2 y_mix = mix(z_mix.xy, z_mix.zw, u.y);
-    return mix(y_mix.x, y_mix.y, u.x);
 }
 
 float SoftSaturate(float x) {
@@ -437,7 +406,9 @@ vec4 calculate_disk_color(
     float rs,
     float inter_radius,
     float outer_radius,
-    float thin
+    float thin,
+    float inner_theta,
+    vec2 inner_cloud_ref
 ) {
     vec3 p_pos = ray_pos - black_hole_pos;
     vec3 pos_on_disk = vec3(dot(p_pos, bx), dot(p_pos, by), dot(p_pos, bz));
@@ -528,11 +499,9 @@ vec4 calculate_disk_color(
             (pos_y < thin * lower_sheet_shape)
         ) {
             float angular_velocity = GetKeplerianAngularVelocity(pos_r, rs);
-            float half_pi_time_inside = kPi / max(GetKeplerianAngularVelocity(3.0 * rs, rs), 1e-6);
 
             float spiral_theta = 12.0 * 2.0 / sqrt(3.0) * atan(sqrt(max(0.6666666 * (pos_r / max(rs, 1e-6)) - 1.0, 0.0)));
-            float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * animated_time;
-            float pos_theta_for_inner_cloud = Vec2ToTheta(pos_on_disk.zx, vec2(cos(0.666666 * inner_theta), sin(0.666666 * inner_theta)));
+            float pos_theta_for_inner_cloud = Vec2ToTheta(pos_on_disk.zx, inner_cloud_ref);
             float pos_theta = Vec2ToTheta(pos_on_disk.zx, vec2(cos(-spiral_theta), sin(-spiral_theta)));
 
             float disk_temperature = pow(
@@ -663,7 +632,7 @@ vec4 calculate_disk_color(
 
             if (abs(pos_y) < thin * (1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0))) {
                 float denom3 = thin * max(1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0), 0.0001);
-                float dust_phase = kPi / max(half_pi_time_inside, 1e-6) * animated_time;
+                float dust_phase = inner_theta;
                 float dust_noise = GenerateAngularAccretionDiskNoise(
                     vec3(
                         1.5 * (pos_theta_for_inner_cloud + dust_phase),
@@ -877,6 +846,13 @@ void fragment() {
         dot(camera_world_pos, disk_bz)
     );
 
+    // These depend only on Rs and anim_time, so they are constant for the whole
+    // ray. Compute once here instead of recomputing on every disk-band march step
+    // inside calculate_disk_color (which runs up to `steps` times per pixel).
+    float half_pi_time_inside = kPi / max(GetKeplerianAngularVelocity(3.0 * Rs, Rs), 1e-6);
+    float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * anim_time;
+    vec2 inner_cloud_ref = vec2(cos(0.666666 * inner_theta), sin(0.666666 * inner_theta));
+
     for (int i = 0; i < MAX_STEPS; i++) {
         if (i >= steps) {
             break;
@@ -900,7 +876,9 @@ void fragment() {
             Rs,
             inter_radius,
             outer_radius,
-            thin
+            thin,
+            inner_theta,
+            inner_cloud_ref
         );
 
         if (disk_col_accum.a >= 0.99 && Luminance(disk_col_accum.rgb) > 0.08) {
