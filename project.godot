@@ -24,3 +24,5 @@ config/icon="res://icon.svg"
 rendering_device/driver.windows="d3d12"
 anti_aliasing/quality/use_taa=true
 rendering/viewport/hdr_2d=true
+scaling_3d/mode=2
+scaling_3d/scale=0.7
