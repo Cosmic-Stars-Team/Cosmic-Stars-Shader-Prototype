@@ -1,0 +1,1013 @@
+#ifndef COSMIC_STARS_BLACK_HOLE_URP_INCLUDED
+#define COSMIC_STARS_BLACK_HOLE_URP_INCLUDED
+
+// Core ray-marched black-hole renderer shared by the URP ShaderLab wrapper.
+// The wrapper must include URP Core.hlsl and declare the textures/material CBUFFER.
+
+#define vec2 float2
+#define vec3 float3
+#define vec4 float4
+#define ivec3 int3
+#define uvec3 uint3
+#define mat3 float3x3
+#define mix lerp
+#define fract frac
+#define VIEWPORT_SIZE _ScreenParams.xy
+#define TIME _Time.y
+#define PI kPi
+
+static const float BASE_STEP = 0.02;
+static const float TIME_RATE = 8.0;
+static const float SHIFT_MAX = 2.6;
+static const float DISK_VISUAL_ROTATE_SPEED = 0.18;
+static const float DISK_OUTER_SPIN_RATIO = 0.6;
+static const float DISK_VISUAL_TIME_SCALE = 0.02;
+static const float DISK_NOISE_SCALE = 1.1;
+static const float DISK_NOISE_CONTRAST = 80.0;
+// Fixed orthonormal rotation applied to the domain each fBm octave. Value noise
+// pins its extrema to the integer lattice; with an integer lacunarity (3.0) the
+// octaves would align axis-wise and show a faint grid/cross weave. Rotating the
+// domain per octave decorrelates them at ~zero cost. (Rodrigues rotation about
+// a normalized axis by ~0.7 rad — arbitrary, just non-axis-aligned.)
+static const mat3 OCTAVE_ROT = mat3(
+    0.81649658, -0.40824829, 0.40824829,
+    0.49236596, 0.86562296, -0.09405968,
+    -0.30151134, 0.29361284, 0.90791226
+);
+static const float DISK_TEMPERATURE_ARGUMENT = 1.4e19;
+static const float PEAK_TEMPERATURE_POW4 = 5.665278e18;
+static const float DISK_TEMP_KELVIN_MIN = 1200.0;
+static const float DISK_TEMP_KELVIN_MAX = 40000.0; // 上限够到蓝白黑体；标准盘温度远到不了此值，无影响
+static const float DISK_WHITE_MIX = 0.002;
+static const float DISK_BRIGHTNESS_FLOOR = 0.0045;
+static const float DISK_RGB_FLOOR = 0.0025;
+static const float BEAMING_SPECTRAL_INDEX = 0.1;
+static const float BEAMING_STRENGTH = 0.58;
+static const float BEAMING_CLAMP = 15.0;
+static const float DISK_HAZE_CONTRAST = 0.66;
+static const float DISK_OPACITY_GAIN = 1.10;
+static const float DISK_CORE_OPACITY_GAIN = 1.28;
+static const float DISK_GLOBAL_BRIGHTNESS = 1.62;
+// Scales the hand-tuned artistic emission additions around the physical core.
+static const float DISK_ARTISTIC_EMISSION = 0.35;
+static const float DISK_BLUE_SIDE_BOOST = 2.10;
+static const float DISK_RED_SIDE_FILL = 1.55;
+static const float DISK_RADIAL_LAYER_STRENGTH = 0.52;
+static const float DISK_FINE_LAYER_STRENGTH = 0.36;
+static const float DISK_MICRO_LAYER_STRENGTH = 0.20;
+static const float DISK_MICRO_FILAMENT_STRENGTH = 0.48;
+static const float DISK_MIDLINE_SHADOW_STRENGTH = 0.20;
+static const float DISK_LAYER_SHADOW_STRENGTH = 0.28;
+static const float DISK_EDGE_SOFTNESS_RS = 0.12;
+static const float DISK_VERTICAL_EDGE_SOFTNESS = 0.22;
+// The lensed arc is the disk's far side compressed near edge-on by lensing, so
+// it's heavily undersampled. Boosting high-freq detail there scatters into bright
+// grain ("不实"). Keep this modest and instead let the arc read as coherent gas;
+// the micro_strand/micro_filament arc terms below now suppress rather than boost.
+static const float DISK_LENSED_ARC_DETAIL = 0.35;
+static const float DISK_LENSED_ARC_DUST_SUPPRESS = 0.42;
+static const float LENS_SKY_BOOST = 0.25;
+static const float LENS_STAR_BOOST = 5.0;
+static const float FAR_FIELD_BOUNDARY_RS = 15.0;
+static const float BLACKBODY_LUT_MAX_TEMPERATURE_K = 40000.0;
+static const bool USE_FAR_FIELD_LUT = true;
+
+static const vec3 DISK_WARM_TINT = vec3(1.00, 0.84, 0.58);
+static const vec3 DISK_HOT_TINT = vec3(0.52, 0.94, 1.96);
+static const vec3 DISK_RIM_TINT = vec3(0.58, 1.02, 2.08);
+static const vec3 DISK_WHITE_TINT = vec3(1.16, 1.14, 1.04);
+static const vec3 DISK_BLUE_RIM_EMISSION = vec3(0.58, 1.18, 3.05);
+static const vec3 DISK_RED_FILL_EMISSION = vec3(3.10, 0.055, 0.010);
+static const vec3 DISK_DUST_TINT = vec3(0.86, 0.38, 0.13);
+static const vec3 DISK_SHADOW_TINT = vec3(0.58, 0.40, 0.26);
+static const vec3 DISK_FILAMENT_WARM_TINT = vec3(1.24, 0.78, 0.44);
+static const vec3 DISK_FILAMENT_HOT_TINT = vec3(0.46, 0.94, 2.08);
+static const vec3 DISK_KEY_LIGHT_TINT = vec3(1.10, 0.96, 0.74);
+static const vec3 DISK_BACK_LIGHT_TINT = vec3(1.10, 0.10, 0.035);
+static const vec3 DISK_COLD_EDGE_TINT = vec3(0.48, 0.78, 1.52);
+static const vec3 DISK_RING_CORE_TINT = vec3(0.90, 1.03, 1.42);
+static const vec3 DISK_RING_HALO_TINT = vec3(1.95, 0.22, 0.055);
+static const vec3 DISK_RING_SHADOW_TINT = vec3(0.42, 0.28, 0.20);
+
+static const int MAX_STEPS = 512;
+
+static const float kPi = 3.141592653589;
+static const float kSpeedOfLight = 299792458.0;
+static const float kLightYear = 9460730472580800.0;
+
+vec3 calc_acceleration(vec3 x, float L2) {
+    float r2 = dot(x, x);
+    float r = sqrt(r2);
+    float r5 = max(r2 * r2 * r, 1e-6);
+    return -(1.5 * Rs * gravity_strength * L2 / r5) * x;
+}
+
+
+// Velocity Verlet: 2nd-order accurate but only ONE acceleration eval per step
+// (the previous step's acceleration is cached in `accel`), vs RK4's four.
+// Ideal here because the force depends only on position, and it stays stable
+// for the tightly-winding photon-ring rays. `accel` MUST be seeded with
+// calc_acceleration(x, L2) once before the first call.
+void verlet_step(inout vec3 x, inout vec3 v, inout vec3 accel, float dl, float L2) {
+    x += v * dl + (0.5 * dl * dl) * accel;
+    vec3 accel_new = calc_acceleration(x, L2);
+    v += (0.5 * dl) * (accel + accel_new);
+    accel = accel_new;
+}
+
+float RandomStep(vec2 input_uv, float seed) {
+    vec3 p = fract(vec3(input_uv, seed) * vec3(0.1031, 0.0973, 0.1099));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float CubicInterpolate(float x) {
+    return 3.0 * x * x - 2.0 * x * x * x;
+}
+
+// Portable integer hash (Jarzynski & Olano, "Hash Functions for GPU Rendering").
+// Replaces the old fract(sin(...)) hash, whose result depends on each GPU's sin()
+// precision and drifts/banding across NVIDIA/AMD/Intel/mobile. This is integer
+// bit-ops only: bit-identical on every device, and cheaper than 8x sin().
+uint PcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Hashed value in [-1, 1] for an integer lattice corner. ivec3->uvec3 keeps the
+// two's-complement bit pattern, so negative coords stay deterministic.
+float LatticeValue(vec3 corner) {
+    uvec3 c = uvec3(ivec3(corner));
+    uint h = PcgHash(c.x ^ PcgHash(c.y ^ PcgHash(c.z)));
+    return 2.0 * (float(h) * (1.0 / 4294967296.0)) - 1.0;
+}
+
+// Procedural value noise: unique hashed value per integer lattice corner,
+// cubic-smoothed trilinear blend. No resolution ceiling, so the high fBm
+// octaves actually produce crisp filaments instead of aliasing into blur.
+float ProceduralNoise(vec3 position) {
+    vec3 pos_int = floor(position);
+    vec3 pos_fract = fract(position);
+    float v000 = LatticeValue(pos_int + vec3(0.0, 0.0, 0.0));
+    float v100 = LatticeValue(pos_int + vec3(1.0, 0.0, 0.0));
+    float v010 = LatticeValue(pos_int + vec3(0.0, 1.0, 0.0));
+    float v110 = LatticeValue(pos_int + vec3(1.0, 1.0, 0.0));
+    float v001 = LatticeValue(pos_int + vec3(0.0, 0.0, 1.0));
+    float v101 = LatticeValue(pos_int + vec3(1.0, 0.0, 1.0));
+    float v011 = LatticeValue(pos_int + vec3(0.0, 1.0, 1.0));
+    float v111 = LatticeValue(pos_int + vec3(1.0, 1.0, 1.0));
+    float cz = CubicInterpolate(pos_fract.z);
+    float cz1 = CubicInterpolate(1.0 - pos_fract.z);
+    float v00 = v001 * cz + v000 * cz1;
+    float v10 = v101 * cz + v100 * cz1;
+    float v01 = v011 * cz + v010 * cz1;
+    float v11 = v111 * cz + v110 * cz1;
+    float cy = CubicInterpolate(pos_fract.y);
+    float cy1 = CubicInterpolate(1.0 - pos_fract.y);
+    float v0 = v01 * cy + v00 * cy1;
+    float v1 = v11 * cy + v10 * cy1;
+    return v1 * CubicInterpolate(pos_fract.x) + v0 * CubicInterpolate(1.0 - pos_fract.x);
+}
+
+float NoiseTextureFetch(vec3 position) {
+    // Hardware trilinear + tiling. Cheap and perfectly smooth for LOW freqs;
+    // anything above the 64^3 LUT's Nyquist just blurs, so the fBm loop only
+    // ever sends low octaves here.
+    return SAMPLE_TEXTURE3D(noise_texture, sampler_noise_texture, position * noise_texture_scale).r * 2.0 - 1.0;
+}
+
+float PerlinNoise(vec3 position) {
+    // Single-sample entry (domain warp, jitter): low-freq, so honor noise_mode
+    // as a global override without per-octave logic.
+    if (noise_mode == 1) {
+        return ProceduralNoise(position);
+    }
+    return NoiseTextureFetch(position);
+}
+
+float SoftSaturate(float x) {
+    return 1.0 - 1.0 / (max(x, 0.0) + 1.0);
+}
+
+float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise_end_level, float contrast_level) {
+    float noise_accumulator = 10.0;
+    // Running frequency multiply replaces a pow(3.0, level) per octave — this is
+    // the hottest loop in the shader, so dropping the per-octave exp/log matters.
+    float noise_frequency = pow(3.0, float(noise_start_level));
+    // Per-octave domain rotation (decorrelates value-noise grid). Seed it so the
+    // start octave isn't axis-aligned either.
+    mat3 rot = mat3(
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    );
+    // Per-octave amplitude, tapered each octave so high-freq octaves don't read
+    // as uniform grain: coarse octaves dominate, the finest become a faint accent
+    // -> flowing strands instead of speckle. 0.1 keeps the coarse octave's
+    // original look; the 0.6 taper is the only "dust -> filament" knob (edit here).
+    float octave_amplitude = 0.1;
+    const float NOISE_PERSISTENCE = 0.6;
+    for (int level = noise_start_level; level < noise_end_level; ++level) {
+        vec3 sample_pos = mul(rot, noise_frequency * position);
+
+        // Hybrid: low octaves from the texture LUT, high octaves procedural.
+        // noise_mode == 0 forces the whole loop onto the (cheapest) texture path.
+        float octave_noise;
+        if (noise_mode == 0 || level < noise_hybrid_split) {
+            octave_noise = NoiseTextureFetch(sample_pos);
+        } else {
+            octave_noise = ProceduralNoise(sample_pos);
+        }
+
+        // Manual high-freq LOD: fade octaves the current sampling rate can't
+        // resolve. footprint == 0 (High tier) is a no-op -> full detail.
+        float octave_fade = clamp(1.0 - noise_detail_footprint * noise_frequency, 0.0, 1.0);
+
+        noise_accumulator *= (1.0 + octave_amplitude * octave_fade * octave_noise);
+        noise_frequency *= 3.0;
+        octave_amplitude *= NOISE_PERSISTENCE;
+        rot = mul(OCTAVE_ROT, rot);
+    }
+    return log(1.0 + pow(max(0.1 * noise_accumulator, 1e-6), contrast_level));
+}
+
+float Vec2ToTheta(vec2 v1, vec2 v2) {
+    float dp = dot(v1, v2);
+    float crossp = v1.x * v2.y - v1.y * v2.x;
+    float lenp = max(length(v1) * length(v2), 1e-6);
+    float angle = asin(clamp(0.999999 * crossp / lenp, -1.0, 1.0));
+
+    if (dp > 0.0) {
+        return angle;
+    } else if (dp < 0.0 && (-crossp) < 0.0) {
+        return kPi - angle;
+    } else if (dp < 0.0 && (-crossp) > 0.0) {
+        return -kPi - angle;
+    }
+
+    return angle;
+}
+
+float WrapToPi(float angle) {
+    return angle - 2.0 * kPi * floor((angle + kPi) / (2.0 * kPi));
+}
+
+vec3 OffsetNoiseAxis(vec3 domain, int axis, float delta) {
+    if (axis == 0) {
+        domain.x += delta;
+    } else if (axis == 1) {
+        domain.y += delta;
+    } else {
+        domain.z += delta;
+    }
+    return domain;
+}
+
+float GenerateAngularAccretionDiskNoise(
+    vec3 domain,
+    int theta_axis,
+    float theta,
+    float theta_scale,
+    int noise_start_level,
+    int noise_end_level,
+    float contrast_level
+) {
+    float base_noise = GenerateAccretionDiskNoise(
+        DISK_NOISE_SCALE * domain,
+        noise_start_level,
+        noise_end_level,
+        contrast_level
+    );
+
+    float wrapped_theta = WrapToPi(theta);
+    float seam_distance = min(wrapped_theta + kPi, kPi - wrapped_theta);
+    float seam_blend = 1.0 - smoothstep(0.0, 0.16 * kPi, seam_distance);
+    if (seam_blend <= 0.0) {
+        return base_noise;
+    }
+
+    float wrap_delta = (wrapped_theta < 0.0) ? 2.0 * kPi : -2.0 * kPi;
+    vec3 wrapped_domain = OffsetNoiseAxis(domain, theta_axis, wrap_delta * theta_scale);
+    float wrapped_noise = GenerateAccretionDiskNoise(
+        DISK_NOISE_SCALE * wrapped_domain,
+        noise_start_level,
+        noise_end_level,
+        contrast_level
+    );
+    return mix(base_noise, wrapped_noise, seam_blend);
+}
+
+float Ridge(float phase, float sharpness) {
+    return pow(clamp(0.5 + 0.5 * cos(phase), 0.0, 1.0), sharpness);
+}
+
+float MapTemperatureToBlackbodyUv(float temperature_k) {
+    float t = clamp(temperature_k, 0.0, BLACKBODY_LUT_MAX_TEMPERATURE_K);
+    if (t <= 12000.0) {
+        return 0.85 * (t / 12000.0);
+    }
+    if (t <= 20000.0) {
+        return 0.85 + 0.10 * ((t - 12000.0) / 8000.0);
+    }
+    return 0.95 + 0.05 * ((t - 20000.0) / 20000.0);
+}
+
+vec3 SampleBlackbodyColor(float temperature_k) {
+    float uv_x = MapTemperatureToBlackbodyUv(temperature_k);
+    vec3 rgb = SAMPLE_TEXTURE2D(blackbody_lut, sampler_blackbody_lut, vec2(uv_x, 0.5)).rgb;
+    return max(rgb, vec3(0.0, 0.0, 0.0));
+}
+
+vec3 DiskTemperatureToRgb(float temperature_k) {
+    vec3 thermal_rgb = SampleBlackbodyColor(temperature_k);
+    return mix(thermal_rgb, vec3(1.0, 0.97, 0.92), DISK_WHITE_MIX);
+}
+
+float BH_Luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+bool BH_IsInvalid(vec3 color) {
+    // Avoid relying on optional isinf/isnan overloads on older shader targets.
+    return any(color != color) || any(abs(color) > 1e30);
+}
+
+
+
+float FarFieldImpactUv(float impact_parameter, float rs) {
+    float b_crit = 1.5 * sqrt(3.0) * rs;
+    float b_min = b_crit + 1e-6 * rs;
+    float b_max = FAR_FIELD_BOUNDARY_RS * rs;
+    return (impact_parameter - b_min) / max(b_max - b_min, 1e-6);
+}
+
+bool TryApplyFarFieldBoundary(inout vec3 ray_pos, inout vec3 ray_dir, float rs) {
+    if (!USE_FAR_FIELD_LUT || rs <= 0.0 || abs(gravity_strength - 1.0) > 0.05) {
+        return false;
+    }
+
+    float boundary_radius = FAR_FIELD_BOUNDARY_RS * rs;
+    float r = length(ray_pos);
+    if (r <= boundary_radius) {
+        return false;
+    }
+
+    vec3 er0 = ray_pos / max(r, 1e-6);
+    float vr0 = dot(ray_dir, er0);
+    if (vr0 >= 0.0) {
+        return false;
+    }
+
+    vec3 vt_vec = ray_dir - er0 * vr0;
+    float vt0 = length(vt_vec);
+    if (vt0 <= 1e-6) {
+        return false;
+    }
+
+    vec3 et0 = vt_vec / vt0;
+    float b = r * vt0;
+    float b_crit = 1.5 * sqrt(3.0) * rs;
+    float b_min = b_crit + 1e-6 * rs;
+    float b_max = boundary_radius;
+    if (b < b_min || b > b_max) {
+        return false;
+    }
+
+    float u = 1.0 / r;
+    vec2 lut_uv = vec2(FarFieldImpactUv(b, rs), u * boundary_radius);
+    float deflection = SAMPLE_TEXTURE2D(far_field_deflection_lut, sampler_far_field_deflection_lut, lut_uv).r;
+
+    float boundary_u = 1.0 / boundary_radius;
+    float vt_boundary = b * boundary_u;
+    float vr_boundary_sq = max(1.0 - b * b * boundary_u * boundary_u + rs * b * b * boundary_u * boundary_u * boundary_u, 0.0);
+    float vr_boundary = -sqrt(vr_boundary_sq);
+
+    float alpha0 = atan2(vt0, vr0);
+    float alpha_boundary = atan2(vt_boundary, vr_boundary);
+    float radial_delta = deflection + alpha0 - alpha_boundary;
+
+    float c = cos(radial_delta);
+    float s = sin(radial_delta);
+    vec3 er_boundary = normalize(er0 * c + et0 * s);
+    vec3 et_boundary = normalize(-er0 * s + et0 * c);
+
+    ray_pos = er_boundary * boundary_radius;
+    ray_dir = normalize(er_boundary * vr_boundary + et_boundary * vt_boundary);
+    return true;
+}
+
+float GetKeplerianAngularVelocity(float radius, float rs) {
+    return sqrt(kSpeedOfLight / kLightYear * kSpeedOfLight * rs / kLightYear / ((2.0 * radius - 3.0 * rs) * radius * radius));
+}
+
+float Shape(float x, float alpha, float beta) {
+    float xc = clamp(x, 0.0, 1.0);
+    float k = pow(alpha + beta, alpha + beta) / (pow(alpha, alpha) * pow(beta, beta));
+    return k * pow(xc, alpha) * pow(1.0 - xc, beta);
+}
+
+void BuildDiskBasis(vec3 disk_normal, vec3 world_up, out vec3 bx, out vec3 by, out vec3 bz) {
+    by = normalize(disk_normal);
+    bz = cross(world_up, by);
+    if (length(bz) < 1e-6) {
+        bz = cross(vec3(1.0, 0.0, 0.0), by);
+    }
+    bz = normalize(bz);
+    bx = normalize(cross(by, bz));
+}
+
+
+
+vec4 calculate_disk_color(
+    vec4 base_color,
+    float animated_time,
+    float step_length,
+    vec3 camera_pos,
+    vec3 ray_pos,
+    vec3 last_ray_pos,
+    vec3 ray_dir,
+    vec3 bx,
+    vec3 by,
+    vec3 bz,
+    vec3 black_hole_pos,
+    float rs,
+    float inter_radius,
+    float outer_radius,
+    float thin,
+    float inner_theta,
+    vec2 inner_cloud_ref
+) {
+    vec3 p_pos = ray_pos - black_hole_pos;
+    vec3 pos_on_disk = vec3(dot(p_pos, bx), dot(p_pos, by), dot(p_pos, bz));
+    float pos_r = length(pos_on_disk.zx);
+    float pos_y = pos_on_disk.y;
+
+    vec3 p_last = last_ray_pos - black_hole_pos;
+    float last_pos_y = dot(p_last, by);
+
+    float radial_edge_softness = max(rs * DISK_EDGE_SOFTNESS_RS, 1e-6);
+    bool crossing = (last_pos_y * pos_y < 0.0);
+
+    // Cheap early-out: a segment that neither crosses the disk midplane nor lies
+    // within the vertical/radial band can never shade -> identical to the
+    // visibility gate below failing. Skips dir transform + all noise sampling.
+    if (!crossing &&
+        (abs(pos_y) >= thin ||
+         pos_r >= outer_radius + radial_edge_softness ||
+         pos_r <= inter_radius - radial_edge_softness)) {
+        return base_color;
+    }
+
+    vec3 dir_on_disk = vec3(dot(ray_dir, bx), dot(ray_dir, by), dot(ray_dir, bz));
+
+    if (crossing) {
+        vec3 last_pos_on_disk = vec3(dot(p_last, bx), dot(p_last, by), dot(p_last, bz));
+        float denom = pos_y - last_pos_y;
+        if (abs(denom) > 1e-6) {
+            vec3 c_point = (-pos_on_disk * last_pos_y + last_pos_on_disk * pos_y) / denom;
+            vec3 disk_plane_jitter_dir = vec3(dir_on_disk.x, 0.0, dir_on_disk.z);
+            if (length(disk_plane_jitter_dir) < 1e-6) {
+                disk_plane_jitter_dir = vec3(-c_point.z, 0.0, c_point.x);
+            }
+            if (length(disk_plane_jitter_dir) < 1e-6) {
+                disk_plane_jitter_dir = vec3(1.0, 0.0, 0.0);
+            }
+            disk_plane_jitter_dir = normalize(disk_plane_jitter_dir);
+            float disk_normal_view = abs(dir_on_disk.y);
+            float plane_jitter_mix = smoothstep(0.35, 0.95, disk_normal_view);
+            vec3 jitter_dir = normalize(mix(dir_on_disk, disk_plane_jitter_dir, plane_jitter_mix));
+            vec2 jitter_uv = c_point.zx / max(rs, 1e-6);
+            float jitter_noise = PerlinNoise(vec3(jitter_uv.x * 2.1, jitter_uv.y * 2.1, 0.37)) * 2.0 - 1.0;
+            float jitter_scale = mix(0.36, 0.14, plane_jitter_mix);
+            pos_on_disk = c_point + min(thin, length(c_point - last_pos_on_disk)) *
+                jitter_dir * jitter_noise * jitter_scale;
+
+            step_length = length(pos_on_disk - last_pos_on_disk);
+            pos_r = length(pos_on_disk.zx);
+            pos_y = pos_on_disk.y;
+        }
+    }
+
+    vec4 color = vec4(0.0, 0.0, 0.0, 0.0);
+
+    if (abs(pos_y) < thin && pos_r < outer_radius + radial_edge_softness && pos_r > inter_radius - radial_edge_softness) {
+        float effective_radius = 1.0 - ((pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6) * 0.5);
+
+        if ((outer_radius - inter_radius) > 9.0 * rs) {
+            if (pos_r < 5.0 * rs + inter_radius) {
+                effective_radius = 1.0 - ((pos_r - inter_radius) / max(9.0 * rs, 1e-6) * 0.5);
+            } else {
+                float denom2 = 1.0 - 5.0 * rs / max(outer_radius - inter_radius, 1e-6);
+                effective_radius = 1.0 - (
+                    0.5 / 0.9 * 0.5 +
+                    (
+                        (pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6) -
+                        5.0 * rs / max(outer_radius - inter_radius, 1e-6)
+                    ) / max(denom2, 1e-6) * 0.5
+                );
+            }
+        }
+
+        float disk_shape = Shape(effective_radius, 4.0, 0.9);
+        float lower_sheet_shape = 1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0);
+        float radial_edge_fade = smoothstep(inter_radius - radial_edge_softness, inter_radius + radial_edge_softness, pos_r) *
+            (1.0 - smoothstep(outer_radius - radial_edge_softness, outer_radius + radial_edge_softness, pos_r));
+        float vertical_edge_fade = 1.0 - smoothstep(
+            thin * disk_shape * (1.0 - DISK_VERTICAL_EDGE_SOFTNESS),
+            thin * disk_shape,
+            abs(pos_y)
+        );
+        float disk_edge_fade = clamp(radial_edge_fade * mix(0.35, 1.0, vertical_edge_fade), 0.0, 1.0);
+
+        if (
+            (abs(pos_y) < thin * disk_shape) ||
+            (pos_y < thin * lower_sheet_shape)
+        ) {
+            float angular_velocity = GetKeplerianAngularVelocity(pos_r, rs);
+
+            float spiral_theta = 12.0 * 2.0 / sqrt(3.0) * atan(sqrt(max(0.6666666 * (pos_r / max(rs, 1e-6)) - 1.0, 0.0)));
+            float pos_theta_for_inner_cloud = Vec2ToTheta(pos_on_disk.zx, inner_cloud_ref);
+            float pos_theta = Vec2ToTheta(pos_on_disk.zx, vec2(cos(-spiral_theta), sin(-spiral_theta)));
+
+            float disk_temperature = pow(
+                DISK_TEMPERATURE_ARGUMENT * pow(max(rs / max(pos_r, 1e-6), 0.10), 3.0) * max(1.0 - sqrt(inter_radius / max(pos_r, 1e-6)), 0.000001),
+                0.25
+            );
+
+            vec3 cloud_velocity = kLightYear / kSpeedOfLight * angular_velocity * cross(vec3(0.0, 1.0, 0.0), pos_on_disk);
+            vec3 n_to_observer = normalize(-dir_on_disk);
+            float beta2 = clamp(dot(cloud_velocity, cloud_velocity), 0.0, 0.9999);
+            float gamma = 1.0 / sqrt(max(1.0 - beta2, 1e-6));
+            float beta_los = clamp(dot(cloud_velocity, n_to_observer), -0.9999, 0.9999);
+            float dopler = 1.0 / max(gamma * (1.0 - beta_los), 1e-6); // delta
+            float grav_shift = sqrt(max(1.0 - rs / max(pos_r, 1e-6), 0.000001)) /
+                               sqrt(max(1.0 - rs / max(length(camera_pos), 1e-6), 0.000001));
+            float red_shift = dopler * grav_shift;
+            float beaming = pow(max(dopler, 1e-4), 3.0 + BEAMING_SPECTRAL_INDEX);
+            beaming = mix(1.0, min(beaming, BEAMING_CLAMP), clamp(BEAMING_STRENGTH, 0.0, 1.0));
+
+            float density = Shape(effective_radius, 4.0, 0.9);
+            float noise_amount = clamp(disk_noise_amount / 1.1, 0.25, 2.5);
+            float thick = 0.0;
+            float vertical_mix_factor = 0.0;
+            float dust_color = 0.0;
+
+            // Make outer disk visibly rotate as well; keep inner ring faster.
+            float radius_ratio = clamp(inter_radius / max(pos_r, 1e-6), 0.0, 1.0);
+            float radius_spin_mix = mix(DISK_OUTER_SPIN_RATIO, 1.0, radius_ratio);
+            float visual_phase = animated_time * DISK_VISUAL_ROTATE_SPEED * DISK_VISUAL_TIME_SCALE * radius_spin_mix;
+            float cloud_theta = pos_theta + visual_phase * 0.70;
+            float strand_theta = pos_theta + visual_phase;
+
+            float rot_pos_r = pos_r / max(rs, 1e-6) +
+                0.3 * sqrt(3.0) * kSpeedOfLight / kLightYear / 3.0 / sqrt(3.0) / max(rs, 1e-6) * animated_time;
+            float vertical_domain = pos_y / max(min(rs, thin / 0.1), 1e-6);
+            float radial01 = clamp((pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6), 0.0, 1.0);
+            float disk_edge_view = sqrt(max(1.0 - dir_on_disk.y * dir_on_disk.y, 0.0));
+            vec2 camera_disk_dir = camera_pos.zx / max(length(camera_pos.zx), 1e-6);
+            vec2 surface_disk_dir = pos_on_disk.zx / max(length(pos_on_disk.zx), 1e-6);
+            float far_side = 1.0 - smoothstep(-0.18, 0.22, dot(surface_disk_dir, camera_disk_dir));
+            float lensed_arc = far_side * smoothstep(0.50, 0.96, disk_edge_view) * smoothstep(0.06, 0.82, radial01);
+            float layer_warp = PerlinNoise(vec3(
+                rot_pos_r * 0.55 + 0.06 * visual_phase,
+                0.34 * pos_theta,
+                vertical_domain * 0.28
+            ));
+            // Second, angle-varying warp so the radial bands wobble around the
+            // ring instead of staying perfectly concentric.
+            float layer_warp_ang = PerlinNoise(vec3(
+                rot_pos_r * 1.30 + 0.10 * visual_phase,
+                1.10 * pos_theta + 3.7,
+                vertical_domain * 0.5 + 1.9
+            ));
+            float ring_break = layer_warp * 4.5 + layer_warp_ang * 5.5 + pos_theta * 0.9;
+            float layer_phase = rot_pos_r * 20.0 + ring_break + visual_phase * 0.85;
+            float radial_layer = Ridge(layer_phase, 7.0);
+            float radial_gap = Ridge(layer_phase + kPi, 5.0);
+            float fine_layer = Ridge(rot_pos_r * 58.0 + layer_warp * 6.5 + layer_warp_ang * 4.0 + pos_theta * 1.4, 17.0);
+            float micro_layer = Ridge(rot_pos_r * 108.0 + layer_warp * 9.0 + layer_warp_ang * 6.0 + pos_theta * 2.2, 28.0);
+            float disk_layers = clamp(
+                radial_layer * DISK_RADIAL_LAYER_STRENGTH +
+                    fine_layer * DISK_FINE_LAYER_STRENGTH +
+                    micro_layer * DISK_MICRO_LAYER_STRENGTH,
+                0.0,
+                1.0
+            );
+            disk_layers = clamp(disk_layers * (1.0 + DISK_LENSED_ARC_DETAIL * lensed_arc), 0.0, 1.0);
+            float midline_shadow = exp(-pow(pos_y / max(thin * 0.11, 1e-6), 2.0)) * disk_edge_view;
+
+            vec4 color0 = vec4(0.0, 0.0, 0.0, 0.0);
+
+            if (abs(pos_y) < thin * density) {
+                float thickness_noise = SoftSaturate(GenerateAngularAccretionDiskNoise(
+                    vec3(1.5 * cloud_theta, rot_pos_r, 1.0),
+                    0,
+                    cloud_theta,
+                    1.5,
+                    1,
+                    3,
+                    DISK_NOISE_CONTRAST
+                ));
+                thick = thin * density * (0.48 + 0.66 * thickness_noise);
+                vertical_mix_factor = max(0.0, 1.0 - abs(pos_y) / max(thick, 1e-6));
+                float vertical_core = pow(vertical_mix_factor, 0.78);
+                density *= 0.70 * vertical_core * density;
+
+                // Low-freq domain warp shared by the cloud/strand samples so they
+                // curl coherently into layered bands. 3 cheap fetches per disk step.
+                vec3 warp_base = vec3(rot_pos_r * 0.6, cloud_theta * 0.5, vertical_domain * 0.6);
+                vec3 domain_warp = disk_domain_warp * vec3(
+                    PerlinNoise(warp_base),
+                    PerlinNoise(warp_base + vec3(31.4, 11.7, 5.2)),
+                    PerlinNoise(warp_base + vec3(7.9, 23.1, 17.6))
+                );
+
+                float cloud_value = GenerateAngularAccretionDiskNoise(
+                    vec3(rot_pos_r, vertical_domain, 0.5 * cloud_theta) + domain_warp,
+                    2,
+                    cloud_theta,
+                    0.5,
+                    3,
+                    6,
+                    DISK_NOISE_CONTRAST
+                );
+
+                float strand_detail = GenerateAngularAccretionDiskNoise(
+                    vec3(rot_pos_r, 1.5 * strand_theta, vertical_domain) + domain_warp,
+                    1,
+                    strand_theta,
+                    1.5,
+                    1,
+                    3,
+                    DISK_NOISE_CONTRAST
+                );
+                float cloud_soft = SoftSaturate(cloud_value);
+                float strand_soft = SoftSaturate(strand_detail);
+                float cloud_gate = smoothstep(0.12, 0.68, cloud_soft);
+                float strand_gate = smoothstep(0.15, 0.78, strand_soft);
+                float continuity_fill = 0.22 + 0.24 * radial_layer + 0.18 * fine_layer;
+                float structured_cloud = mix(continuity_fill * cloud_soft, cloud_value, cloud_gate);
+                color0 = vec4(structured_cloud, structured_cloud, structured_cloud,
+                    structured_cloud * (0.56 + 0.44 * strand_gate));
+                float micro_strand = SoftSaturate(GenerateAngularAccretionDiskNoise(
+                    vec3(rot_pos_r * 1.75 + 0.08 * layer_warp, 3.0 * strand_theta, vertical_domain * 1.35) + 1.5 * domain_warp,
+                    1,
+                    strand_theta,
+                    3.0,
+                    2,
+                    4,
+                    46.0
+                ));
+                // Suppress (not amplify) micro detail in the lensed arc: it's the
+                // undersampled region, so high-freq strands there read as grain.
+                micro_strand *= strand_gate * (0.35 + 0.65 * vertical_core) * (1.0 - 0.30 * lensed_arc);
+                float structure_gate = clamp(0.38 + 0.50 * strand_gate + 0.38 * disk_layers + 0.16 * micro_strand, 0.28, 1.0);
+                float layer_gain = 1.0 + disk_layers * (0.48 + 0.34 * vertical_core);
+                float layer_shadow = 1.0 - DISK_LAYER_SHADOW_STRENGTH * radial_gap *
+                    (0.35 + 0.65 * strand_gate) * (1.0 - 0.22 * micro_layer);
+                color0.xyz *= density * 1.4 * (
+                    0.14 + 0.76 * vertical_core +
+                    (0.82 - 0.58 * vertical_core) * strand_gate +
+                    DISK_MICRO_FILAMENT_STRENGTH * micro_strand * (1.0 - 0.20 * lensed_arc)
+                ) * noise_amount * layer_gain * layer_shadow;
+                color0.a *= density * structure_gate * clamp(noise_amount, 0.35, 1.45) *
+                    mix(0.90, 1.14, radial_layer) * mix(1.0, 0.86, radial_gap) *
+                    mix(1.0, 1.08, micro_strand);
+            }
+
+            if (abs(pos_y) < thin * (1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0))) {
+                float denom3 = thin * max(1.0 - 5.0 * pow(2.0 * (1.0 - effective_radius), 2.0), 0.0001);
+                float dust_phase = inner_theta;
+                float dust_noise = GenerateAngularAccretionDiskNoise(
+                    vec3(
+                        1.5 * (pos_theta_for_inner_cloud + dust_phase),
+                        pos_r / max(rs, 1e-6),
+                        vertical_domain
+                    ),
+                    0,
+                    pos_theta_for_inner_cloud,
+                    1.5,
+                    0,
+                    4,
+                    DISK_NOISE_CONTRAST
+                );
+                dust_color = max(1.0 - pow(pos_y / max(denom3, 1e-6), 2.0), 0.0) * dust_noise;
+                float dust_layer_gate = clamp(0.44 + 0.56 * disk_layers - 0.42 * radial_gap, 0.14, 1.0);
+                float dust_filament_gate = smoothstep(0.12, 0.72, radial_layer + 0.65 * fine_layer + 0.35 * micro_layer);
+                float layered_dust = dust_color * (0.12 + 0.70 * radial_layer + 0.36 * fine_layer + 0.22 * micro_layer) *
+                    dust_layer_gate * dust_filament_gate * mix(1.0, DISK_LENSED_ARC_DUST_SUPPRESS, lensed_arc);
+
+                float disk_normal_view = abs(dir_on_disk.y);
+                float dust_view = max(sqrt(max(1.0001 - dir_on_disk.y * dir_on_disk.y, 0.0)), 0.28 * smoothstep(0.35, 1.0, disk_normal_view));
+                color0 += 0.0024 * vec4(DISK_DUST_TINT * layered_dust, 0.034 * layered_dust) *
+                    dust_view * min(1.0, dopler * dopler);
+            }
+
+            color = color0;
+            color *= 1.0 + 20.0 * exp(-10.0 * (pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6));
+
+            float bright_without_redshift = 4.5 * disk_temperature * disk_temperature * disk_temperature * disk_temperature / max(PEAK_TEMPERATURE_POW4, 1e-6);
+            if (disk_temperature > 1000.0) {
+                // Standard shift for blackbody temperature uses frequency shift once.
+                disk_temperature = max(1000.0, disk_temperature * red_shift);
+            }
+
+            disk_temperature = min(100000.0, disk_temperature);
+            bright_without_redshift = max(bright_without_redshift, DISK_BRIGHTNESS_FLOOR);
+
+            float thermal_kelvin = disk_temperature / exp((pos_r - inter_radius) / (0.6 * max(outer_radius - inter_radius, 1e-6)));
+            thermal_kelvin *= disk_temperature_scale;
+            thermal_kelvin = clamp(thermal_kelvin, DISK_TEMP_KELVIN_MIN, DISK_TEMP_KELVIN_MAX);
+            // Physical gate for the warm/red artistic terms below. They are keyed
+            // on the Doppler-cold side, not on temperature, so at extreme thermal
+            // scales (hot blue disk) they used to leave an unphysical red/brown
+            // contamination. Fade them out as disk_temperature_scale rises:
+            //   scale ~0.84 (normal warm disk) -> warm_keep = 1.0 (identical look)
+            //   scale >= 4.0 (hot blue preset) -> warm_keep = 0.0 (pure blackbody blue)
+            float warm_keep = 1.0 - smoothstep(2.0, 4.0, disk_temperature_scale);
+            vec3 thermal_rgb = DiskTemperatureToRgb(thermal_kelvin);
+            float hot_side = smoothstep(0.90, 1.68, dopler);
+            float inner_rim = exp(-9.0 * radial01);
+            float ring_core = exp(-44.0 * radial01);
+            float ring_halo = max(exp(-8.0 * radial01) - 0.58 * ring_core, 0.0);
+            float ring_shadow_band = smoothstep(0.045, 0.14, radial01) * (1.0 - smoothstep(0.18, 0.42, radial01));
+            float grazing_view = smoothstep(0.18, 0.95, sqrt(max(1.0 - dir_on_disk.y * dir_on_disk.y, 0.0)));
+            float rim_light = inner_rim * (0.32 + 0.68 * grazing_view) * (0.36 + 0.64 * hot_side);
+
+            // warm_keep fades the cold-side warm tint toward neutral white at high
+            // temperature; the hot-side blue (DISK_HOT_TINT) is always allowed.
+            thermal_rgb *= mix(mix(vec3(1.0, 1.0, 1.0), DISK_WARM_TINT, warm_keep), DISK_HOT_TINT, hot_side);
+            thermal_rgb = mix(thermal_rgb, DISK_RIM_TINT, 0.30 * inner_rim * hot_side);
+            thermal_rgb = mix(thermal_rgb, DISK_RING_CORE_TINT, 0.22 * ring_core * (0.45 + 0.55 * hot_side));
+            float white_heat = clamp(0.20 * hot_side + 0.12 * inner_rim + 0.06 * ring_core, 0.0, 0.34);
+            thermal_rgb = mix(thermal_rgb, DISK_WHITE_TINT, white_heat);
+
+            color.xyz *= bright_without_redshift * min(1.0, 1.8 * (outer_radius - pos_r) / max(outer_radius - inter_radius, 1e-6)) * thermal_rgb;
+            color.xyz *= min(SHIFT_MAX, red_shift);
+            color.xyz *= beaming;
+
+            red_shift = min(red_shift, SHIFT_MAX);
+            color.xyz *= pow(abs(1.0 - (1.0 - min(1.0, red_shift)) * (pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6)), 9.0);
+            color.xyz *= min(1.0, 1.0 + 0.5 * ((pos_r - inter_radius) / max(inter_radius, 1e-6) + inter_radius / max(pos_r - inter_radius, 1e-6)) - max(1.0, red_shift));
+
+            float path_length_weight = step_length / max(rs, 1e-6);
+            color *= path_length_weight;
+            color *= disk_edge_fade;
+            float local_luma = BH_Luminance(color.rgb);
+            float strand_mask = smoothstep(0.010, 0.115, local_luma);
+            float opacity_core_gate = smoothstep(0.08, 0.32, color.a);
+            float filament_core = smoothstep(0.080, 0.270, local_luma) * opacity_core_gate;
+            float highlight_luma = local_luma / (1.0 + local_luma * 0.85);
+            float cold_side = 1.0 - hot_side;
+            float volume_shadow = smoothstep(0.16, 0.72, color.a) * (1.0 - 0.55 * filament_core) * (0.28 + 0.72 * cold_side);
+            float optical_depth = color.a * DISK_OPACITY_GAIN *
+                (1.0 + DISK_CORE_OPACITY_GAIN * filament_core + 0.35 * inner_rim) *
+                mix(0.92, 1.08, disk_layers) * mix(1.0, 0.90, radial_gap);
+            vec3 disk_tangent = vec3(-pos_on_disk.z, 0.0, pos_on_disk.x);
+            if (length(disk_tangent) > 1e-6) {
+                disk_tangent = normalize(disk_tangent);
+            } else {
+                disk_tangent = vec3(1.0, 0.0, 0.0);
+            }
+            float tangent_view = smoothstep(0.18, 0.92, abs(dot(disk_tangent, n_to_observer)));
+            float anisotropic_filament = filament_core * strand_mask * tangent_view *
+                (0.32 + 0.68 * hot_side) * (0.45 + 0.55 * grazing_view);
+            vec3 filament_tint = mix(DISK_FILAMENT_WARM_TINT, DISK_FILAMENT_HOT_TINT, hot_side);
+            float inner_key = exp(-2.25 * radial01);
+            float key_light = smoothstep(0.70, 1.50, dopler) * (0.42 + 0.58 * inner_key) *
+                (0.38 + 0.62 * filament_core);
+            float back_shadow = (1.0 - smoothstep(0.82, 1.18, dopler)) *
+                smoothstep(0.10, 0.82, color.a) * (0.45 + 0.55 * radial01);
+            float cold_edge = rim_light * hot_side * grazing_view * (0.35 + 0.65 * filament_core);
+            float ring_core_light = ring_core * (0.35 + 0.65 * grazing_view) * (0.42 + 0.58 * hot_side) *
+                (1.0 + 0.55 * lensed_arc);
+            float ring_halo_light = ring_halo * (0.30 + 0.70 * strand_mask) * (0.32 + 0.68 * hot_side) *
+                (1.0 + 0.72 * lensed_arc);
+            vec3 key_tint = mix(DISK_KEY_LIGHT_TINT, DISK_COLD_EDGE_TINT, hot_side);
+            float layer_visibility = (0.28 + 0.72 * grazing_view) * (0.25 + 0.75 * strand_mask) *
+                (1.0 + 0.65 * lensed_arc);
+            color.rgb *= mix(DISK_HAZE_CONTRAST, 1.16, strand_mask);
+            color.rgb *= mix(0.94, 1.18, filament_core);
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), vec3(0.55, 0.94, 1.72), hot_side * (0.22 + 0.78 * strand_mask));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), vec3(1.46, 0.34, 0.16), cold_side * warm_keep * (0.14 + 0.86 * strand_mask));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), DISK_SHADOW_TINT, clamp(volume_shadow * 0.36, 0.0, 0.72));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), DISK_RING_SHADOW_TINT, clamp(ring_shadow_band * cold_side * (1.0 - 0.55 * filament_core) * 0.34, 0.0, 0.55));
+            color.rgb *= 1.0 + disk_layers * layer_visibility * (0.48 + 0.24 * hot_side + 0.20 * lensed_arc);
+            color.rgb *= 1.0 - clamp(radial_gap * DISK_LAYER_SHADOW_STRENGTH *
+                (0.35 + 0.65 * grazing_view) * (0.55 + 0.45 * cold_side) * (1.0 + 0.55 * lensed_arc), 0.0, 0.60);
+            color.rgb *= 1.0 - clamp(midline_shadow * DISK_MIDLINE_SHADOW_STRENGTH *
+                (0.55 + 0.45 * cold_side), 0.0, 0.38);
+            color.rgb *= 1.0 + 0.48 * key_light;
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), DISK_BACK_LIGHT_TINT, clamp(back_shadow * 0.42, 0.0, 0.68));
+            float emission_luma = max(highlight_luma, color.a * (0.010 + 0.018 * disk_layers));
+            vec3 artistic_emission = vec3(0.0, 0.0, 0.0);
+            artistic_emission += key_tint * emission_luma * key_light * 0.62;
+            artistic_emission += filament_tint * emission_luma * anisotropic_filament * 0.66;
+            artistic_emission += mix(DISK_RING_HALO_TINT, DISK_COLD_EDGE_TINT, hot_side) *
+                emission_luma * disk_layers * layer_visibility * (0.24 + 0.18 * lensed_arc);
+            artistic_emission += DISK_RING_HALO_TINT * emission_luma * ring_halo_light * 0.32;
+            artistic_emission += DISK_RING_CORE_TINT * emission_luma * ring_core_light * 0.46;
+            artistic_emission += DISK_COLD_EDGE_TINT * emission_luma * cold_edge * 0.30;
+            float hot_white_core = hot_side * smoothstep(0.10, 0.68, color.a) *
+                (0.42 + 0.58 * inner_key) * (0.38 + 0.62 * strand_mask);
+            artistic_emission += DISK_WHITE_TINT * emission_luma * hot_white_core * 0.92;
+            artistic_emission += DISK_BLUE_RIM_EMISSION * emission_luma * hot_white_core * 0.22;
+            float blue_side = rim_light * hot_side * (0.35 + 0.65 * strand_mask) * (0.45 + 0.55 * grazing_view);
+            artistic_emission += DISK_BLUE_RIM_EMISSION * emission_luma * blue_side * DISK_BLUE_SIDE_BOOST;
+            float red_side = cold_side * warm_keep * smoothstep(0.08, 0.70, color.a) *
+                (0.28 + 0.72 * radial01) * strand_mask *
+                clamp(0.92 * ring_halo + 0.30 * inner_key, 0.0, 1.0);
+            float red_body_light = cold_side * warm_keep * smoothstep(0.06, 0.62, color.a) *
+                (0.28 + 0.72 * radial01) * (0.32 + 0.68 * grazing_view) *
+                (0.30 + 0.70 * disk_layers);
+            artistic_emission += DISK_RED_FILL_EMISSION * emission_luma * red_body_light * 0.32;
+            artistic_emission += DISK_RED_FILL_EMISSION * emission_luma * red_side * DISK_RED_SIDE_FILL;
+            color.rgb += artistic_emission * DISK_ARTISTIC_EMISSION;
+            color.rgb *= DISK_GLOBAL_BRIGHTNESS;
+            float lit_optical_depth = optical_depth * (1.0 + 0.10 * key_light + 0.18 * back_shadow);
+            color.a = clamp(1.0 - exp(-lit_optical_depth), 0.0, 1.0);
+            color.a = clamp(color.a + 0.020 * anisotropic_filament + 0.008 * ring_core + 0.004 * ring_halo, 0.0, 1.0);
+            float alpha_luma_gate = smoothstep(0.002, 0.035, BH_Luminance(color.rgb));
+            // Floor (was 0.42): dim outer/red gas still occludes the background so
+            // the disk reads as a body, not a translucent haze with stars showing
+            // through. Bright cores are unaffected (gate -> 1.0 there).
+            color.a *= mix(0.60, 1.0, alpha_luma_gate);
+            color.rgb += DISK_RIM_TINT * max(highlight_luma, DISK_RGB_FLOOR * color.a) * rim_light * 0.58;
+            float blue_rim = rim_light * hot_side * strand_mask;
+            color.rgb += DISK_BLUE_RIM_EMISSION * max(highlight_luma, DISK_RGB_FLOOR * color.a) * blue_rim * 0.34;
+            color.rgb = max(color.rgb, vec3(DISK_RGB_FLOOR, DISK_RGB_FLOOR, DISK_RGB_FLOOR) * color.a * thermal_rgb);
+        }
+    }
+
+    return base_color + color * (1.0 - base_color.a);
+}
+
+float4 BlackHoleFragment(BlackHoleVaryings input) : SV_Target {
+    vec2 SCREEN_UV = GetNormalizedScreenSpaceUV(input.positionCS);
+    vec2 ndc = SCREEN_UV * 2.0 - 1.0;
+    float aspect = VIEWPORT_SIZE.x / VIEWPORT_SIZE.y;
+
+    vec3 fwd = -normalize(vec3(
+        UNITY_MATRIX_I_V._m02,
+        UNITY_MATRIX_I_V._m12,
+        UNITY_MATRIX_I_V._m22
+    ));
+    vec3 rgt = normalize(vec3(
+        UNITY_MATRIX_I_V._m00,
+        UNITY_MATRIX_I_V._m10,
+        UNITY_MATRIX_I_V._m20
+    ));
+    vec3 up = normalize(vec3(
+        UNITY_MATRIX_I_V._m01,
+        UNITY_MATRIX_I_V._m11,
+        UNITY_MATRIX_I_V._m21
+    ));
+
+    vec3 rd = normalize(fwd * 1.5 + rgt * ndc.x * aspect + up * ndc.y);
+
+    vec3 camera_world_pos = GetCameraPositionWS();
+    vec3 x = camera_world_pos;
+    vec3 v = rd;
+
+    if (disk_outer_radius_ratio <= FAR_FIELD_BOUNDARY_RS) {
+        TryApplyFarFieldBoundary(x, v, Rs);
+    }
+
+    vec3 L_vec = cross(x, v);
+    float L2 = dot(L_vec, L_vec);
+    float impact_parameter = sqrt(max(L2, 0.0));
+    float capture_impact = 1.5 * sqrt(3.0) * Rs;
+    bool captured_by_impact = dot(x, v) < 0.0 && impact_parameter <= capture_impact * 1.0005;
+
+    bool hit_hole = false;
+    bool escaped = false;
+    float real_escape_radius = 500.0;
+    float min_ray_radius = length(x);
+
+    float anim_time = TIME * TIME_RATE;
+    vec4 disk_col_accum = vec4(0.0, 0.0, 0.0, 0.0);
+    vec2 pixel_coord = floor(SCREEN_UV * VIEWPORT_SIZE);
+    float dither = mix(0.18, 0.82, RandomStep(pixel_coord, 0.371));
+
+    float initial_dl = BASE_STEP * (max(length(x), Rs * 0.5) + 0.01 * length(x) * length(x));
+    // Re-test Velocity Verlet now that texturing freed up the hash registers.
+    vec3 accel = calc_acceleration(x, L2);
+    verlet_step(x, v, accel, initial_dl * dither, L2);
+
+    float inter_radius = disk_inner_radius_ratio * Rs;
+    float outer_radius = disk_outer_radius_ratio * Rs;
+    float thin = disk_thickness_ratio * Rs;
+
+    vec3 last_ray_pos = x;
+    float step_length = 0.0;
+
+    vec3 disk_normal = normalize(vec3(disk_tilt, 1.0, 0.0));
+    vec3 world_up = vec3(0.0, 1.0, 0.0);
+
+    // Disk-space basis and camera position are constant for the whole ray:
+    // build once here instead of rebuilding inside the per-step disk function.
+    vec3 disk_bx;
+    vec3 disk_by;
+    vec3 disk_bz;
+    BuildDiskBasis(disk_normal, world_up, disk_bx, disk_by, disk_bz);
+    vec3 camera_disk_pos = vec3(
+        dot(camera_world_pos, disk_bx),
+        dot(camera_world_pos, disk_by),
+        dot(camera_world_pos, disk_bz)
+    );
+
+    // These depend only on Rs and anim_time, so they are constant for the whole
+    // ray. Compute once here instead of recomputing on every disk-band march step
+    // inside calculate_disk_color (which runs up to `steps` times per pixel).
+    float half_pi_time_inside = kPi / max(GetKeplerianAngularVelocity(3.0 * Rs, Rs), 1e-6);
+    float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * anim_time;
+    vec2 inner_cloud_ref = vec2(cos(0.666666 * inner_theta), sin(0.666666 * inner_theta));
+
+    [loop]
+    for (int i = 0; i < MAX_STEPS; i++) {
+        if (i >= steps) {
+            break;
+        }
+
+        float r = length(x);
+        min_ray_radius = min(min_ray_radius, r);
+
+        disk_col_accum = calculate_disk_color(
+            disk_col_accum,
+            anim_time,
+            step_length,
+            camera_disk_pos,
+            x,
+            last_ray_pos,
+            v,
+            disk_bx,
+            disk_by,
+            disk_bz,
+            vec3(0.0, 0.0, 0.0),
+            Rs,
+            inter_radius,
+            outer_radius,
+            thin,
+            inner_theta,
+            inner_cloud_ref
+        );
+
+        if (disk_col_accum.a >= 0.99 && BH_Luminance(disk_col_accum.rgb) > 0.08) {
+            break;
+        }
+
+        if (r <= Rs) {
+            hit_hole = true;
+            break;
+        }
+        if (r >= real_escape_radius && dot(x, v) > 0.0) {
+            escaped = true;
+            break;
+        }
+
+        float dl = BASE_STEP * (max(r, Rs * 0.5) + 0.01 * r * r);
+
+        last_ray_pos = x;
+
+        verlet_step(x, v, accel, dl, L2);
+        step_length = dl;
+    }
+
+    float final_r = length(x);
+    if (!hit_hole && !captured_by_impact && !escaped && final_r > FAR_FIELD_BOUNDARY_RS * Rs && dot(x, v) > 0.0) {
+        escaped = true;
+    }
+
+
+    vec3 out_col = vec3(0.0, 0.0, 0.0);
+    if (escaped && !hit_hole && !captured_by_impact) {
+        vec3 ray_dir = normalize(v);
+        float phi = atan2(ray_dir.x, -ray_dir.z);
+        float theta = acos(clamp(ray_dir.y, -1.0, 1.0));
+        vec2 uv = vec2(phi / (2.0 * PI) + 0.5, theta / PI);
+        out_col = SAMPLE_TEXTURE2D(sky_texture, sampler_sky_texture, uv).rgb;
+
+        float lens_radius = min_ray_radius / max(Rs, 1e-6);
+        float lens_strength = smoothstep(1.05, 1.55, lens_radius) * (1.0 - smoothstep(2.2, 8.5, lens_radius));
+    float sky_luma = BH_Luminance(out_col);
+        float star_mask = smoothstep(0.015, 0.22, sky_luma);
+        out_col *= 1.0 + lens_strength * (LENS_SKY_BOOST + LENS_STAR_BOOST * star_mask);
+        out_col += vec3(0.012, 0.018, 0.030) * lens_strength * star_mask;
+    }
+    // Keep already-accumulated foreground disk emission even if the ray later falls into the hole.
+    // The black hole only removes the sky background for that ray.
+
+    float visible_disk = smoothstep(0.006, 0.050, BH_Luminance(disk_col_accum.rgb));
+    float disk_a = clamp(disk_col_accum.a * mix(0.35, 1.0, visible_disk), 0.0, 1.0);
+    vec3 composite = (out_col * (1.0 - disk_a) + disk_col_accum.rgb) * output_exposure;
+    if (BH_IsInvalid(composite)) {
+        composite = vec3(0.0, 0.0, 0.0);
+    }
+    composite = clamp(composite, vec3(0.0, 0.0, 0.0), vec3(128.0, 128.0, 128.0));
+    return float4(composite, 1.0);
+}
+
+
+
+#endif
