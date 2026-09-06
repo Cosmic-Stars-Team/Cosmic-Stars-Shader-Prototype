@@ -1,152 +1,99 @@
-shader_type spatial;
+#ifndef COSMIC_STARS_BLACK_HOLE_URP_INCLUDED
+#define COSMIC_STARS_BLACK_HOLE_URP_INCLUDED
 
-render_mode unshaded, cull_disabled, depth_test_disabled, depth_draw_never;
+// Core ray-marched black-hole renderer shared by the URP ShaderLab wrapper.
+// The wrapper must include URP Core.hlsl and declare the textures/material CBUFFER.
 
-uniform float Rs = 4.0;
-uniform float gravity_strength = 1.0;
-uniform int steps = 512;
-uniform float disk_tilt = -0.3;
-uniform float disk_inner_radius_ratio = 2.5;
-uniform float disk_outer_radius_ratio = 7.6;
-uniform float disk_thickness_ratio = 0.62;
-uniform float disk_noise_amount = 1.1;
-uniform float disk_temperature_scale = 0.71;
-uniform float output_exposure = 0.9;
-// Highlight white point for FilmicDisplay's extended-Reinhard shoulder: the HDR
-// luminance that maps to ~1.0. Higher = more highlight headroom (bright cores
-// keep gradient before clipping); lower = highlights clip sooner. Live-tunable.
-uniform float tonemap_white : hint_range(2.0, 16.0) = 6.0;
+#define vec2 float2
+#define vec3 float3
+#define vec4 float4
+#define ivec3 int3
+#define uvec3 uint3
+#define mat3 float3x3
+#define mix lerp
+#define fract frac
+#define VIEWPORT_SIZE _ScreenParams.xy
+#define TIME _Time.y
+#define PI kPi
 
-uniform sampler2D sky_texture : filter_nearest;
-uniform sampler2D blackbody_lut : filter_linear, repeat_disable;
-uniform sampler2D far_field_deflection_lut : filter_linear, repeat_disable;
-// (b) Quick perf-validation: a tiling 3D noise texture (NoiseTexture3D / FastNoiseLite).
-// PerlinNoise() samples this instead of computing the 8-corner hash, to measure how
-// much the texture fetch saves. Visual will differ from the procedural noise until we
-// bake a pixel-identical version.
-uniform sampler3D noise_texture : filter_linear, repeat_enable;
-uniform float noise_texture_scale = 0.15;
-// 0 = texture fetch (fast, blurred high freqs — Performance tier)
-// 1 = procedural 8-corner hash like the reference (crisp filaments, costs more — High tier)
-uniform int noise_mode = 1;
-
-// --- Hybrid fBm controls (see GenerateAccretionDiskNoise) ---
-// Octave level at/above which fBm switches from the 64^3 texture LUT (cheap,
-// perfect for low freqs) to the procedural PCG hash (crisp, no resolution
-// ceiling). Octaves below this read the texture; octaves >= this go procedural.
-// Higher = more octaves on the cheap texture path = faster, softer.
-uniform int noise_hybrid_split = 2;
-
-// Manual high-frequency LOD. This is a raymarched volume, so there is no clean
-// screen-space derivative to drive automatic AA; instead the quality preset
-// dials this up on low/FSR2 tiers to fade the highest octaves and kill shimmer,
-// and leaves it at 0 on High for full detail. Roughly: noise-domain texels per
-// pixel. Fade per octave = clamp(1 - footprint * octave_frequency, 0, 1).
-uniform float noise_detail_footprint = 0.0;
-
-// Domain-warp strength for the disk clouds: a low-freq noise offsets the cloud
-// sampling domain so strands curl and pile into discrete layered bands instead
-// of a smooth radial gradient. 0 = off (original). Live-tunable.
-uniform float disk_domain_warp = 0.6;
-
-// --- RESERVED for future "relativistic fly-around" feature (not yet wired) ---
-// Camera velocity in world space as a fraction of c (β = v/c), to be set per
-// frame by the camera script from its path derivative. When the SR optics are
-// implemented this drives observer-frame aberration / Doppler / beaming of the
-// sky and disk. Default (0,0,0) = static observer = ZERO visual change, so it is
-// safe to leave declared. See docs: camera-side computes β, shader applies boost.
-uniform vec3 camera_beta = vec3(0.0, 0.0, 0.0);
-
-const float BASE_STEP = 0.02;
-const float TIME_RATE = 8.0;
-const float TIME_OVERRIDE = -1.0;
-const float SHIFT_MAX = 2.6;
-const float DISK_VISUAL_ROTATE_SPEED = 0.18;
-const float DISK_OUTER_SPIN_RATIO = 0.6;
-const float DISK_VISUAL_TIME_SCALE = 0.02;
-const float DISK_NOISE_SCALE = 1.1;
-const float DISK_NOISE_CONTRAST = 80.0;
+static const float BASE_STEP = 0.02;
+static const float TIME_RATE = 8.0;
+static const float SHIFT_MAX = 2.6;
+static const float DISK_VISUAL_ROTATE_SPEED = 0.18;
+static const float DISK_OUTER_SPIN_RATIO = 0.6;
+static const float DISK_VISUAL_TIME_SCALE = 0.02;
+static const float DISK_NOISE_SCALE = 1.1;
+static const float DISK_NOISE_CONTRAST = 80.0;
 // Fixed orthonormal rotation applied to the domain each fBm octave. Value noise
 // pins its extrema to the integer lattice; with an integer lacunarity (3.0) the
 // octaves would align axis-wise and show a faint grid/cross weave. Rotating the
 // domain per octave decorrelates them at ~zero cost. (Rodrigues rotation about
 // a normalized axis by ~0.7 rad — arbitrary, just non-axis-aligned.)
-const mat3 OCTAVE_ROT = mat3(
-    vec3(0.81649658, 0.49236596, -0.30151134),
-    vec3(-0.40824829, 0.86562296, 0.29361284),
-    vec3(0.40824829, -0.09405968, 0.90791226)
+static const mat3 OCTAVE_ROT = mat3(
+    0.81649658, -0.40824829, 0.40824829,
+    0.49236596, 0.86562296, -0.09405968,
+    -0.30151134, 0.29361284, 0.90791226
 );
-const float DISK_TEMPERATURE_ARGUMENT = 1.4e19;
-const float PEAK_TEMPERATURE_POW4 = 5.665278e18;
-const float DISK_TEMP_KELVIN_MIN = 1200.0;
-const float DISK_TEMP_KELVIN_MAX = 40000.0; // 上限够到蓝白黑体；标准盘温度远到不了此值，无影响
-const float DISK_WHITE_MIX = 0.002;
-const float DISK_BRIGHTNESS_FLOOR = 0.0045;
-const float DISK_RGB_FLOOR = 0.0025;
-const float BEAMING_SPECTRAL_INDEX = 0.1;
-const float BEAMING_STRENGTH = 0.58;
-const float BEAMING_CLAMP = 15.0;
-const float BLOOM_THRESHOLD = 0.92;
-const float BLOOM_EMISSION = 4.05;
-const float HDR_BLOOM_KNEE = 0.62;
-const float HDR_EMISSION_GAIN = 1.26;
-const float USE_REINHARD_TONEMAP = 0.0;
-const float EMISSION_SOFT_CLIP = 0.72;
-const float DISK_HAZE_CONTRAST = 0.66;
-const float DISK_OPACITY_GAIN = 1.10;
-const float DISK_CORE_OPACITY_GAIN = 1.28;
-const float DISK_GLOBAL_BRIGHTNESS = 1.62;
-// A: scales the hand-tuned artistic emission additions. 1.0 = current Godot look;
-// lower toward 0.0 to let the example's physical T^4 * KelvinToRgb core dominate.
-const float DISK_ARTISTIC_EMISSION = 0.35;
-const float DISK_BLUE_SIDE_BOOST = 2.10;
-const float DISK_RED_SIDE_FILL = 1.55;
-const float DISK_RADIAL_LAYER_STRENGTH = 0.52;
-const float DISK_FINE_LAYER_STRENGTH = 0.36;
-const float DISK_MICRO_LAYER_STRENGTH = 0.20;
-const float DISK_MICRO_FILAMENT_STRENGTH = 0.48;
-const float DISK_MIDLINE_SHADOW_STRENGTH = 0.20;
-const float DISK_LAYER_SHADOW_STRENGTH = 0.28;
-const float DISK_EDGE_SOFTNESS_RS = 0.12;
-const float DISK_VERTICAL_EDGE_SOFTNESS = 0.22;
+static const float DISK_TEMPERATURE_ARGUMENT = 1.4e19;
+static const float PEAK_TEMPERATURE_POW4 = 5.665278e18;
+static const float DISK_TEMP_KELVIN_MIN = 1200.0;
+static const float DISK_TEMP_KELVIN_MAX = 40000.0; // 上限够到蓝白黑体；标准盘温度远到不了此值，无影响
+static const float DISK_WHITE_MIX = 0.002;
+static const float DISK_BRIGHTNESS_FLOOR = 0.0045;
+static const float DISK_RGB_FLOOR = 0.0025;
+static const float BEAMING_SPECTRAL_INDEX = 0.1;
+static const float BEAMING_STRENGTH = 0.58;
+static const float BEAMING_CLAMP = 15.0;
+static const float DISK_HAZE_CONTRAST = 0.66;
+static const float DISK_OPACITY_GAIN = 1.10;
+static const float DISK_CORE_OPACITY_GAIN = 1.28;
+static const float DISK_GLOBAL_BRIGHTNESS = 1.62;
+// Scales the hand-tuned artistic emission additions around the physical core.
+static const float DISK_ARTISTIC_EMISSION = 0.35;
+static const float DISK_BLUE_SIDE_BOOST = 2.10;
+static const float DISK_RED_SIDE_FILL = 1.55;
+static const float DISK_RADIAL_LAYER_STRENGTH = 0.52;
+static const float DISK_FINE_LAYER_STRENGTH = 0.36;
+static const float DISK_MICRO_LAYER_STRENGTH = 0.20;
+static const float DISK_MICRO_FILAMENT_STRENGTH = 0.48;
+static const float DISK_MIDLINE_SHADOW_STRENGTH = 0.20;
+static const float DISK_LAYER_SHADOW_STRENGTH = 0.28;
+static const float DISK_EDGE_SOFTNESS_RS = 0.12;
+static const float DISK_VERTICAL_EDGE_SOFTNESS = 0.22;
 // The lensed arc is the disk's far side compressed near edge-on by lensing, so
 // it's heavily undersampled. Boosting high-freq detail there scatters into bright
 // grain ("不实"). Keep this modest and instead let the arc read as coherent gas;
 // the micro_strand/micro_filament arc terms below now suppress rather than boost.
-const float DISK_LENSED_ARC_DETAIL = 0.35;
-const float DISK_LENSED_ARC_DUST_SUPPRESS = 0.42;
-const float LENS_SKY_BOOST = 0.25;
-const float LENS_STAR_BOOST = 5.0;
-const float FAR_FIELD_BOUNDARY_RS = 15.0;
-const float BLACKBODY_LUT_MAX_TEMPERATURE_K = 40000.0;
-const bool USE_FAR_FIELD_LUT = true;
+static const float DISK_LENSED_ARC_DETAIL = 0.35;
+static const float DISK_LENSED_ARC_DUST_SUPPRESS = 0.42;
+static const float LENS_SKY_BOOST = 0.25;
+static const float LENS_STAR_BOOST = 5.0;
+static const float FAR_FIELD_BOUNDARY_RS = 15.0;
+static const float BLACKBODY_LUT_MAX_TEMPERATURE_K = 40000.0;
+static const bool USE_FAR_FIELD_LUT = true;
 
-const vec3 DISK_WARM_TINT = vec3(1.00, 0.84, 0.58);
-const vec3 DISK_HOT_TINT = vec3(0.52, 0.94, 1.96);
-const vec3 DISK_RIM_TINT = vec3(0.58, 1.02, 2.08);
-const vec3 DISK_WHITE_TINT = vec3(1.16, 1.14, 1.04);
-const vec3 DISK_BLUE_RIM_EMISSION = vec3(0.58, 1.18, 3.05);
-const vec3 DISK_RED_FILL_EMISSION = vec3(3.10, 0.055, 0.010);
-const vec3 DISK_DUST_TINT = vec3(0.86, 0.38, 0.13);
-const vec3 DISK_SHADOW_TINT = vec3(0.58, 0.40, 0.26);
-const vec3 DISK_FILAMENT_WARM_TINT = vec3(1.24, 0.78, 0.44);
-const vec3 DISK_FILAMENT_HOT_TINT = vec3(0.46, 0.94, 2.08);
-const vec3 DISK_KEY_LIGHT_TINT = vec3(1.10, 0.96, 0.74);
-const vec3 DISK_BACK_LIGHT_TINT = vec3(1.10, 0.10, 0.035);
-const vec3 DISK_COLD_EDGE_TINT = vec3(0.48, 0.78, 1.52);
-const vec3 DISK_RING_CORE_TINT = vec3(0.90, 1.03, 1.42);
-const vec3 DISK_RING_HALO_TINT = vec3(1.95, 0.22, 0.055);
-const vec3 DISK_RING_SHADOW_TINT = vec3(0.42, 0.28, 0.20);
+static const vec3 DISK_WARM_TINT = vec3(1.00, 0.84, 0.58);
+static const vec3 DISK_HOT_TINT = vec3(0.52, 0.94, 1.96);
+static const vec3 DISK_RIM_TINT = vec3(0.58, 1.02, 2.08);
+static const vec3 DISK_WHITE_TINT = vec3(1.16, 1.14, 1.04);
+static const vec3 DISK_BLUE_RIM_EMISSION = vec3(0.58, 1.18, 3.05);
+static const vec3 DISK_RED_FILL_EMISSION = vec3(3.10, 0.055, 0.010);
+static const vec3 DISK_DUST_TINT = vec3(0.86, 0.38, 0.13);
+static const vec3 DISK_SHADOW_TINT = vec3(0.58, 0.40, 0.26);
+static const vec3 DISK_FILAMENT_WARM_TINT = vec3(1.24, 0.78, 0.44);
+static const vec3 DISK_FILAMENT_HOT_TINT = vec3(0.46, 0.94, 2.08);
+static const vec3 DISK_KEY_LIGHT_TINT = vec3(1.10, 0.96, 0.74);
+static const vec3 DISK_BACK_LIGHT_TINT = vec3(1.10, 0.10, 0.035);
+static const vec3 DISK_COLD_EDGE_TINT = vec3(0.48, 0.78, 1.52);
+static const vec3 DISK_RING_CORE_TINT = vec3(0.90, 1.03, 1.42);
+static const vec3 DISK_RING_HALO_TINT = vec3(1.95, 0.22, 0.055);
+static const vec3 DISK_RING_SHADOW_TINT = vec3(0.42, 0.28, 0.20);
 
-const int MAX_STEPS = 512;
+static const int MAX_STEPS = 512;
 
-const float kPi = 3.141592653589;
-const float kSpeedOfLight = 299792458.0;
-const float kLightYear = 9460730472580800.0;
-
-void vertex() {
-    POSITION = vec4(VERTEX.xy, 1.0, 1.0);
-}
+static const float kPi = 3.141592653589;
+static const float kSpeedOfLight = 299792458.0;
+static const float kLightYear = 9460730472580800.0;
 
 vec3 calc_acceleration(vec3 x, float L2) {
     float r2 = dot(x, x);
@@ -155,22 +102,6 @@ vec3 calc_acceleration(vec3 x, float L2) {
     return -(1.5 * Rs * gravity_strength * L2 / r5) * x;
 }
 
-void rk4_step(inout vec3 x, inout vec3 v, float dl, float L2) {
-    vec3 k1_x = v;
-    vec3 k1_v = calc_acceleration(x, L2);
-
-    vec3 k2_x = v + k1_v * (dl * 0.5);
-    vec3 k2_v = calc_acceleration(x + k1_x * (dl * 0.5), L2);
-
-    vec3 k3_x = v + k2_v * (dl * 0.5);
-    vec3 k3_v = calc_acceleration(x + k2_x * (dl * 0.5), L2);
-
-    vec3 k4_x = v + k3_v * dl;
-    vec3 k4_v = calc_acceleration(x + k3_x * dl, L2);
-
-    x += (k1_x + 2.0 * k2_x + 2.0 * k3_x + k4_x) * (dl / 6.0);
-    v += (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v) * (dl / 6.0);
-}
 
 // Velocity Verlet: 2nd-order accurate but only ONE acceleration eval per step
 // (the previous step's acceleration is cached in `accel`), vs RK4's four.
@@ -243,7 +174,7 @@ float NoiseTextureFetch(vec3 position) {
     // Hardware trilinear + tiling. Cheap and perfectly smooth for LOW freqs;
     // anything above the 64^3 LUT's Nyquist just blurs, so the fBm loop only
     // ever sends low octaves here.
-    return texture(noise_texture, position * noise_texture_scale).r * 2.0 - 1.0;
+    return SAMPLE_TEXTURE3D(noise_texture, sampler_noise_texture, position * noise_texture_scale).r * 2.0 - 1.0;
 }
 
 float PerlinNoise(vec3 position) {
@@ -266,7 +197,11 @@ float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise
     float noise_frequency = pow(3.0, float(noise_start_level));
     // Per-octave domain rotation (decorrelates value-noise grid). Seed it so the
     // start octave isn't axis-aligned either.
-    mat3 rot = mat3(1.0);
+    mat3 rot = mat3(
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    );
     // Per-octave amplitude, tapered each octave so high-freq octaves don't read
     // as uniform grain: coarse octaves dominate, the finest become a faint accent
     // -> flowing strands instead of speckle. 0.1 keeps the coarse octave's
@@ -274,7 +209,7 @@ float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise
     float octave_amplitude = 0.1;
     const float NOISE_PERSISTENCE = 0.6;
     for (int level = noise_start_level; level < noise_end_level; ++level) {
-        vec3 sample_pos = rot * (noise_frequency * position);
+        vec3 sample_pos = mul(rot, noise_frequency * position);
 
         // Hybrid: low octaves from the texture LUT, high octaves procedural.
         // noise_mode == 0 forces the whole loop onto the (cheapest) texture path.
@@ -292,7 +227,7 @@ float GenerateAccretionDiskNoise(vec3 position, int noise_start_level, int noise
         noise_accumulator *= (1.0 + octave_amplitude * octave_fade * octave_noise);
         noise_frequency *= 3.0;
         octave_amplitude *= NOISE_PERSISTENCE;
-        rot = OCTAVE_ROT * rot;
+        rot = mul(OCTAVE_ROT, rot);
     }
     return log(1.0 + pow(max(0.1 * noise_accumulator, 1e-6), contrast_level));
 }
@@ -380,8 +315,8 @@ float MapTemperatureToBlackbodyUv(float temperature_k) {
 
 vec3 SampleBlackbodyColor(float temperature_k) {
     float uv_x = MapTemperatureToBlackbodyUv(temperature_k);
-    vec3 rgb = texture(blackbody_lut, vec2(uv_x, 0.5)).rgb;
-    return max(rgb, vec3(0.0));
+    vec3 rgb = SAMPLE_TEXTURE2D(blackbody_lut, sampler_blackbody_lut, vec2(uv_x, 0.5)).rgb;
+    return max(rgb, vec3(0.0, 0.0, 0.0));
 }
 
 vec3 DiskTemperatureToRgb(float temperature_k) {
@@ -389,49 +324,16 @@ vec3 DiskTemperatureToRgb(float temperature_k) {
     return mix(thermal_rgb, vec3(1.0, 0.97, 0.92), DISK_WHITE_MIX);
 }
 
-float Luminance(vec3 color) {
+float BH_Luminance(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
 }
 
-vec3 FilmicDisplay(vec3 color) {
-    vec3 safe_color = max(color, vec3(0.0));
-    // Tonemap on luminance with an extended-Reinhard shoulder, then reapply the
-    // original chroma. The old per-channel "1 - exp(-c*0.82)" washed bright pixels
-    // to flat white (every channel independently saturated to 1) AND had no
-    // shoulder, so the approaching disk side clipped to a structureless white
-    // blob. Here the curve compresses brightness while the hue/structure survive;
-    // a controlled desaturation only at the very top keeps the hottest core from
-    // looking unnaturally saturated. tonemap_white = HDR level mapped to ~1.0.
-    float l = Luminance(safe_color);
-    float lt = l * (1.0 + l / (tonemap_white * tonemap_white)) / (1.0 + l);
-    vec3 tinted = safe_color * (lt / max(l, 1e-5));
-    float desat = clamp((lt - 0.85) / 0.15, 0.0, 1.0) * 0.5;
-    return clamp(mix(tinted, vec3(lt), desat), vec3(0.0), vec3(1.0));
+bool BH_IsInvalid(vec3 color) {
+    // Avoid relying on optional isinf/isnan overloads on older shader targets.
+    return any(color != color) || any(abs(color) > 1e30);
 }
 
-vec3 HdrBloomSource(vec3 hdr_color) {
-    vec3 safe_color = max(hdr_color, vec3(0.0));
-    float luma = Luminance(safe_color);
-    float response = smoothstep(BLOOM_THRESHOLD, BLOOM_THRESHOLD + HDR_BLOOM_KNEE, luma);
-    return safe_color * response * HDR_EMISSION_GAIN;
-}
 
-// Faithful port of the reference Shadertoy bloom "inverse tonemap":
-// it expands a near-LDR color back into HDR so bright pixels explode
-// (0.5 -> ~1.0, 0.9 -> ~6.3, 0.99 -> clamped to BLOOM_EXPAND_MAX), while a
-// per-channel hue factor keeps the original color ratio. The expanded value
-// drives EMISSION so Godot's glow blurs it into the signature bleed.
-const float BLOOM_EXPAND_MAX = 12.0;
-vec3 BloomExpand(vec3 c) {
-    c = clamp(c, vec3(0.0), vec3(0.999));
-    float denom = max(c.g + c.g + c.b, 1e-4);
-    vec3 hue_factor = 3.0 * c / denom;
-    vec3 e;
-    e.r = min(-4.0 * log(1.0 - pow(c.r, 2.2)), BLOOM_EXPAND_MAX * hue_factor.r);
-    e.g = min(-4.0 * log(1.0 - pow(c.g, 2.2)), BLOOM_EXPAND_MAX * hue_factor.g);
-    e.b = min(-4.0 * log(1.0 - pow(c.b, 2.2)), BLOOM_EXPAND_MAX * hue_factor.b);
-    return max(e, vec3(0.0));
-}
 
 float FarFieldImpactUv(float impact_parameter, float rs) {
     float b_crit = 1.5 * sqrt(3.0) * rs;
@@ -474,15 +376,15 @@ bool TryApplyFarFieldBoundary(inout vec3 ray_pos, inout vec3 ray_dir, float rs) 
 
     float u = 1.0 / r;
     vec2 lut_uv = vec2(FarFieldImpactUv(b, rs), u * boundary_radius);
-    float deflection = texture(far_field_deflection_lut, lut_uv).r;
+    float deflection = SAMPLE_TEXTURE2D(far_field_deflection_lut, sampler_far_field_deflection_lut, lut_uv).r;
 
     float boundary_u = 1.0 / boundary_radius;
     float vt_boundary = b * boundary_u;
     float vr_boundary_sq = max(1.0 - b * b * boundary_u * boundary_u + rs * b * b * boundary_u * boundary_u * boundary_u, 0.0);
     float vr_boundary = -sqrt(vr_boundary_sq);
 
-    float alpha0 = atan(vt0, vr0);
-    float alpha_boundary = atan(vt_boundary, vr_boundary);
+    float alpha0 = atan2(vt0, vr0);
+    float alpha_boundary = atan2(vt_boundary, vr_boundary);
     float radial_delta = deflection + alpha0 - alpha_boundary;
 
     float c = cos(radial_delta);
@@ -515,24 +417,7 @@ void BuildDiskBasis(vec3 disk_normal, vec3 world_up, out vec3 bx, out vec3 by, o
     bx = normalize(cross(by, bz));
 }
 
-vec3 WorldToBlackHoleSpace(vec3 position, vec3 black_hole_pos, vec3 disk_normal, vec3 world_up) {
-    vec3 bx;
-    vec3 by;
-    vec3 bz;
-    BuildDiskBasis(disk_normal, world_up, bx, by, bz);
 
-    vec3 p = position - black_hole_pos;
-    return vec3(dot(p, bx), dot(p, by), dot(p, bz));
-}
-
-vec3 ApplyBlackHoleRotation(vec3 direction, vec3 disk_normal, vec3 world_up) {
-    vec3 bx;
-    vec3 by;
-    vec3 bz;
-    BuildDiskBasis(disk_normal, world_up, bx, by, bz);
-
-    return vec3(dot(direction, bx), dot(direction, by), dot(direction, bz));
-}
 
 vec4 calculate_disk_color(
     vec4 base_color,
@@ -575,14 +460,12 @@ vec4 calculate_disk_color(
     }
 
     vec3 dir_on_disk = vec3(dot(ray_dir, bx), dot(ray_dir, by), dot(ray_dir, bz));
-    float crossed_midplane = 0.0;
 
     if (crossing) {
         vec3 last_pos_on_disk = vec3(dot(p_last, bx), dot(p_last, by), dot(p_last, bz));
         float denom = pos_y - last_pos_y;
         if (abs(denom) > 1e-6) {
             vec3 c_point = (-pos_on_disk * last_pos_y + last_pos_on_disk * pos_y) / denom;
-            crossed_midplane = 1.0;
             vec3 disk_plane_jitter_dir = vec3(dir_on_disk.x, 0.0, dir_on_disk.z);
             if (length(disk_plane_jitter_dir) < 1e-6) {
                 disk_plane_jitter_dir = vec3(-c_point.z, 0.0, c_point.x);
@@ -606,7 +489,7 @@ vec4 calculate_disk_color(
         }
     }
 
-    vec4 color = vec4(0.0);
+    vec4 color = vec4(0.0, 0.0, 0.0, 0.0);
 
     if (abs(pos_y) < thin && pos_r < outer_radius + radial_edge_softness && pos_r > inter_radius - radial_edge_softness) {
         float effective_radius = 1.0 - ((pos_r - inter_radius) / max(outer_radius - inter_radius, 1e-6) * 0.5);
@@ -714,7 +597,7 @@ vec4 calculate_disk_color(
             disk_layers = clamp(disk_layers * (1.0 + DISK_LENSED_ARC_DETAIL * lensed_arc), 0.0, 1.0);
             float midline_shadow = exp(-pow(pos_y / max(thin * 0.11, 1e-6), 2.0)) * disk_edge_view;
 
-            vec4 color0 = vec4(0.0);
+            vec4 color0 = vec4(0.0, 0.0, 0.0, 0.0);
 
             if (abs(pos_y) < thin * density) {
                 float thickness_noise = SoftSaturate(GenerateAngularAccretionDiskNoise(
@@ -765,7 +648,8 @@ vec4 calculate_disk_color(
                 float strand_gate = smoothstep(0.15, 0.78, strand_soft);
                 float continuity_fill = 0.22 + 0.24 * radial_layer + 0.18 * fine_layer;
                 float structured_cloud = mix(continuity_fill * cloud_soft, cloud_value, cloud_gate);
-                color0 = vec4(vec3(structured_cloud), structured_cloud * (0.56 + 0.44 * strand_gate));
+                color0 = vec4(structured_cloud, structured_cloud, structured_cloud,
+                    structured_cloud * (0.56 + 0.44 * strand_gate));
                 float micro_strand = SoftSaturate(GenerateAngularAccretionDiskNoise(
                     vec3(rot_pos_r * 1.75 + 0.08 * layer_warp, 3.0 * strand_theta, vertical_domain * 1.35) + 1.5 * domain_warp,
                     1,
@@ -853,7 +737,7 @@ vec4 calculate_disk_color(
 
             // warm_keep fades the cold-side warm tint toward neutral white at high
             // temperature; the hot-side blue (DISK_HOT_TINT) is always allowed.
-            thermal_rgb *= mix(mix(vec3(1.0), DISK_WARM_TINT, warm_keep), DISK_HOT_TINT, hot_side);
+            thermal_rgb *= mix(mix(vec3(1.0, 1.0, 1.0), DISK_WARM_TINT, warm_keep), DISK_HOT_TINT, hot_side);
             thermal_rgb = mix(thermal_rgb, DISK_RIM_TINT, 0.30 * inner_rim * hot_side);
             thermal_rgb = mix(thermal_rgb, DISK_RING_CORE_TINT, 0.22 * ring_core * (0.45 + 0.55 * hot_side));
             float white_heat = clamp(0.20 * hot_side + 0.12 * inner_rim + 0.06 * ring_core, 0.0, 0.34);
@@ -870,7 +754,7 @@ vec4 calculate_disk_color(
             float path_length_weight = step_length / max(rs, 1e-6);
             color *= path_length_weight;
             color *= disk_edge_fade;
-            float local_luma = Luminance(color.rgb);
+            float local_luma = BH_Luminance(color.rgb);
             float strand_mask = smoothstep(0.010, 0.115, local_luma);
             float opacity_core_gate = smoothstep(0.08, 0.32, color.a);
             float filament_core = smoothstep(0.080, 0.270, local_luma) * opacity_core_gate;
@@ -905,19 +789,19 @@ vec4 calculate_disk_color(
                 (1.0 + 0.65 * lensed_arc);
             color.rgb *= mix(DISK_HAZE_CONTRAST, 1.16, strand_mask);
             color.rgb *= mix(0.94, 1.18, filament_core);
-            color.rgb *= mix(vec3(1.0), vec3(0.55, 0.94, 1.72), hot_side * (0.22 + 0.78 * strand_mask));
-            color.rgb *= mix(vec3(1.0), vec3(1.46, 0.34, 0.16), cold_side * warm_keep * (0.14 + 0.86 * strand_mask));
-            color.rgb *= mix(vec3(1.0), DISK_SHADOW_TINT, clamp(volume_shadow * 0.36, 0.0, 0.72));
-            color.rgb *= mix(vec3(1.0), DISK_RING_SHADOW_TINT, clamp(ring_shadow_band * cold_side * (1.0 - 0.55 * filament_core) * 0.34, 0.0, 0.55));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), vec3(0.55, 0.94, 1.72), hot_side * (0.22 + 0.78 * strand_mask));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), vec3(1.46, 0.34, 0.16), cold_side * warm_keep * (0.14 + 0.86 * strand_mask));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), DISK_SHADOW_TINT, clamp(volume_shadow * 0.36, 0.0, 0.72));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), DISK_RING_SHADOW_TINT, clamp(ring_shadow_band * cold_side * (1.0 - 0.55 * filament_core) * 0.34, 0.0, 0.55));
             color.rgb *= 1.0 + disk_layers * layer_visibility * (0.48 + 0.24 * hot_side + 0.20 * lensed_arc);
             color.rgb *= 1.0 - clamp(radial_gap * DISK_LAYER_SHADOW_STRENGTH *
                 (0.35 + 0.65 * grazing_view) * (0.55 + 0.45 * cold_side) * (1.0 + 0.55 * lensed_arc), 0.0, 0.60);
             color.rgb *= 1.0 - clamp(midline_shadow * DISK_MIDLINE_SHADOW_STRENGTH *
                 (0.55 + 0.45 * cold_side), 0.0, 0.38);
             color.rgb *= 1.0 + 0.48 * key_light;
-            color.rgb *= mix(vec3(1.0), DISK_BACK_LIGHT_TINT, clamp(back_shadow * 0.42, 0.0, 0.68));
+            color.rgb *= mix(vec3(1.0, 1.0, 1.0), DISK_BACK_LIGHT_TINT, clamp(back_shadow * 0.42, 0.0, 0.68));
             float emission_luma = max(highlight_luma, color.a * (0.010 + 0.018 * disk_layers));
-            vec3 artistic_emission = vec3(0.0);
+            vec3 artistic_emission = vec3(0.0, 0.0, 0.0);
             artistic_emission += key_tint * emission_luma * key_light * 0.62;
             artistic_emission += filament_tint * emission_luma * anisotropic_filament * 0.66;
             artistic_emission += mix(DISK_RING_HALO_TINT, DISK_COLD_EDGE_TINT, hot_side) *
@@ -944,7 +828,7 @@ vec4 calculate_disk_color(
             float lit_optical_depth = optical_depth * (1.0 + 0.10 * key_light + 0.18 * back_shadow);
             color.a = clamp(1.0 - exp(-lit_optical_depth), 0.0, 1.0);
             color.a = clamp(color.a + 0.020 * anisotropic_filament + 0.008 * ring_core + 0.004 * ring_halo, 0.0, 1.0);
-            float alpha_luma_gate = smoothstep(0.002, 0.035, Luminance(color.rgb));
+            float alpha_luma_gate = smoothstep(0.002, 0.035, BH_Luminance(color.rgb));
             // Floor (was 0.42): dim outer/red gas still occludes the background so
             // the disk reads as a body, not a translucent haze with stars showing
             // through. Bright cores are unaffected (gate -> 1.0 there).
@@ -952,24 +836,37 @@ vec4 calculate_disk_color(
             color.rgb += DISK_RIM_TINT * max(highlight_luma, DISK_RGB_FLOOR * color.a) * rim_light * 0.58;
             float blue_rim = rim_light * hot_side * strand_mask;
             color.rgb += DISK_BLUE_RIM_EMISSION * max(highlight_luma, DISK_RGB_FLOOR * color.a) * blue_rim * 0.34;
-            color.rgb = max(color.rgb, vec3(DISK_RGB_FLOOR) * color.a * thermal_rgb);
+            color.rgb = max(color.rgb, vec3(DISK_RGB_FLOOR, DISK_RGB_FLOOR, DISK_RGB_FLOOR) * color.a * thermal_rgb);
         }
     }
-	
+
     return base_color + color * (1.0 - base_color.a);
 }
 
-void fragment() {
+float4 BlackHoleFragment(BlackHoleVaryings input) : SV_Target {
+    vec2 SCREEN_UV = GetNormalizedScreenSpaceUV(input.positionCS);
     vec2 ndc = SCREEN_UV * 2.0 - 1.0;
     float aspect = VIEWPORT_SIZE.x / VIEWPORT_SIZE.y;
 
-    vec3 fwd = -INV_VIEW_MATRIX[2].xyz;
-    vec3 rgt = INV_VIEW_MATRIX[0].xyz;
-    vec3 up = INV_VIEW_MATRIX[1].xyz;
+    vec3 fwd = -normalize(vec3(
+        UNITY_MATRIX_I_V._m02,
+        UNITY_MATRIX_I_V._m12,
+        UNITY_MATRIX_I_V._m22
+    ));
+    vec3 rgt = normalize(vec3(
+        UNITY_MATRIX_I_V._m00,
+        UNITY_MATRIX_I_V._m10,
+        UNITY_MATRIX_I_V._m20
+    ));
+    vec3 up = normalize(vec3(
+        UNITY_MATRIX_I_V._m01,
+        UNITY_MATRIX_I_V._m11,
+        UNITY_MATRIX_I_V._m21
+    ));
 
     vec3 rd = normalize(fwd * 1.5 + rgt * ndc.x * aspect + up * ndc.y);
 
-    vec3 camera_world_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 camera_world_pos = GetCameraPositionWS();
     vec3 x = camera_world_pos;
     vec3 v = rd;
 
@@ -988,8 +885,8 @@ void fragment() {
     float real_escape_radius = 500.0;
     float min_ray_radius = length(x);
 
-    float anim_time = (TIME_OVERRIDE >= 0.0) ? TIME_OVERRIDE : (TIME * TIME_RATE);
-    vec4 disk_col_accum = vec4(0.0);
+    float anim_time = TIME * TIME_RATE;
+    vec4 disk_col_accum = vec4(0.0, 0.0, 0.0, 0.0);
     vec2 pixel_coord = floor(SCREEN_UV * VIEWPORT_SIZE);
     float dither = mix(0.18, 0.82, RandomStep(pixel_coord, 0.371));
 
@@ -1027,6 +924,7 @@ void fragment() {
     float inner_theta = kPi / max(half_pi_time_inside, 1e-6) * anim_time;
     vec2 inner_cloud_ref = vec2(cos(0.666666 * inner_theta), sin(0.666666 * inner_theta));
 
+    [loop]
     for (int i = 0; i < MAX_STEPS; i++) {
         if (i >= steps) {
             break;
@@ -1046,7 +944,7 @@ void fragment() {
             disk_bx,
             disk_by,
             disk_bz,
-            vec3(0.0),
+            vec3(0.0, 0.0, 0.0),
             Rs,
             inter_radius,
             outer_radius,
@@ -1055,7 +953,7 @@ void fragment() {
             inner_cloud_ref
         );
 
-        if (disk_col_accum.a >= 0.99 && Luminance(disk_col_accum.rgb) > 0.08) {
+        if (disk_col_accum.a >= 0.99 && BH_Luminance(disk_col_accum.rgb) > 0.08) {
             break;
         }
 
@@ -1082,17 +980,17 @@ void fragment() {
     }
 
 
-    vec3 out_col = vec3(0.0);
+    vec3 out_col = vec3(0.0, 0.0, 0.0);
     if (escaped && !hit_hole && !captured_by_impact) {
         vec3 ray_dir = normalize(v);
-        float phi = atan(ray_dir.x, -ray_dir.z);
+        float phi = atan2(ray_dir.x, -ray_dir.z);
         float theta = acos(clamp(ray_dir.y, -1.0, 1.0));
         vec2 uv = vec2(phi / (2.0 * PI) + 0.5, theta / PI);
-        out_col = texture(sky_texture, uv).rgb;
+        out_col = SAMPLE_TEXTURE2D(sky_texture, sampler_sky_texture, uv).rgb;
 
         float lens_radius = min_ray_radius / max(Rs, 1e-6);
         float lens_strength = smoothstep(1.05, 1.55, lens_radius) * (1.0 - smoothstep(2.2, 8.5, lens_radius));
-        float sky_luma = Luminance(out_col);
+    float sky_luma = BH_Luminance(out_col);
         float star_mask = smoothstep(0.015, 0.22, sky_luma);
         out_col *= 1.0 + lens_strength * (LENS_SKY_BOOST + LENS_STAR_BOOST * star_mask);
         out_col += vec3(0.012, 0.018, 0.030) * lens_strength * star_mask;
@@ -1100,24 +998,16 @@ void fragment() {
     // Keep already-accumulated foreground disk emission even if the ray later falls into the hole.
     // The black hole only removes the sky background for that ray.
 
-    float visible_disk = smoothstep(0.006, 0.050, Luminance(disk_col_accum.rgb));
+    float visible_disk = smoothstep(0.006, 0.050, BH_Luminance(disk_col_accum.rgb));
     float disk_a = clamp(disk_col_accum.a * mix(0.35, 1.0, visible_disk), 0.0, 1.0);
     vec3 composite = (out_col * (1.0 - disk_a) + disk_col_accum.rgb) * output_exposure;
-	if (any(isnan(composite)) || any(isinf(composite))) {
-        composite = vec3(0.0); 
+    if (BH_IsInvalid(composite)) {
+        composite = vec3(0.0, 0.0, 0.0);
     }
-	composite = clamp(composite, vec3(0.0), vec3(128.0));
-	
-    vec3 display_col = composite;
-    if (USE_REINHARD_TONEMAP > 0.5) {
-        display_col = composite / (vec3(1.0) + composite);
-    }
-	
-    ALBEDO = clamp(FilmicDisplay(display_col), vec3(0.0), vec3(1.0));
-
-    // A: reference-style bloom. Expand the displayed LDR image back into HDR with
-    // the inverse-tonemap so bright disk/photon-ring pixels bleed strongly through
-    // Godot's glow, instead of the gentle thresholded EMISSION used before.
-    vec3 bloom_src = BloomExpand(ALBEDO);
-    EMISSION = clamp(bloom_src, vec3(0.0), vec3(128.0));
+    composite = clamp(composite, vec3(0.0, 0.0, 0.0), vec3(128.0, 128.0, 128.0));
+    return float4(composite, 1.0);
 }
+
+
+
+#endif
